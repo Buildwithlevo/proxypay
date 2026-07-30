@@ -27,6 +27,7 @@ import {
   transactionRoutesV1,
   vaultRoutesV1,
 } from "./routes/v1";
+import { transactionRoutesV2 } from "./routes/v2";
 import { transactionRoutes } from "./routes/transactions";
 import { authRoutes } from "./routes/auth";
 import { bulkRoutes } from "./routes/bulk";
@@ -347,25 +348,28 @@ app.use("/api/v1/disputes", disputeRoutesV1);
 app.use("/api/v1/stats", statsRoutesV1);
 app.use("/api/v1/vaults", vaultRoutesV1);
 app.use("/api/v1/compliance/travel-rule", travelRuleRoutes);
+app.use("/api/v2/transactions", transactionRoutesV2);
 
-app.use(
-  "/api/transactions",
-  (req: VersionedRequest, res, next) => {
-    req.apiVersion = "v1";
-    res.setHeader("API-Version", "v1");
-    res.setHeader("Deprecation", "true");
-    res.setHeader(
-      "Sunset",
-      new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toUTCString(),
-    );
-    res.setHeader(
-      "Url",
-      `https://example.com${req.originalUrl.replace("/api/", "/api/v1/")}`,
-    );
-    next();
-  },
-  transactionRoutes,
-);
+app.use("/api/transactions", (req: VersionedRequest, res, next) => {
+  // Route by the negotiated version (URL path takes priority in
+  // apiVersionMiddleware; falls back to Accept-Version/Accept headers).
+  if (req.apiVersion === "v2") {
+    return transactionRoutesV2(req, res, next);
+  }
+
+  req.apiVersion = "v1";
+  res.setHeader("API-Version", "v1");
+  res.setHeader("Deprecation", "true");
+  res.setHeader(
+    "Sunset",
+    new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toUTCString(),
+  );
+  res.setHeader(
+    "Url",
+    `https://example.com${req.originalUrl.replace("/api/", "/api/v1/")}`,
+  );
+  return transactionRoutes(req, res, next);
+});
 app.use("/api/transactions", transactionDisputeRoutes);
 app.use("/api/transactions/bulk", bulkRoutes);
 app.use("/api/disputes", disputeRoutes);
