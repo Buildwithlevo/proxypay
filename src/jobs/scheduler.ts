@@ -157,6 +157,12 @@ const JOBS: JobConfig[] = [
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
   },
+  {
+    name: "travel-rule-audit-report",
+    // Monthly on the 2nd at 5:00 AM - generates previous month's Travel Rule coverage report
+    schedule: process.env.TRAVEL_RULE_AUDIT_REPORT_CRON || "0 5 2 * *",
+    handler: runTravelRuleAuditReportJob,
+  },
 ];
 
 async function runJob(job: JobConfig): Promise<void> {
