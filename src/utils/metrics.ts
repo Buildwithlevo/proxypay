@@ -210,18 +210,22 @@ export const crossChainAnomalyTotal = new Counter({
   registers: [register],
 });
 
-// Index Bloat Monitoring Metrics
-export const indexBloatPercentage = new Gauge({
-  name: "index_bloat_percentage",
-  help: "Estimated bloat percentage for a PostgreSQL index",
-  labelNames: ["schemaname", "tablename", "indexname"],
+// Sanctions List Monitoring Metrics
+export const sanctionsListLastUpdateTimestamp = new Gauge({
+  name: "sanctions_list_last_update_timestamp_seconds",
+  help: "Unix timestamp of the last successful sanctions list sync",
   registers: [register],
 });
 
-// Ledger Integrity Metrics
-export const ledgerIntegrityScore = new Gauge({
-  name: "ledger_integrity_score",
-  help: "Double-entry ledger integrity score (100=fully balanced)",
+export const sanctionsListRecordCount = new Gauge({
+  name: "sanctions_list_record_count",
+  help: "Number of records in the sanctions list after the last sync",
+  registers: [register],
+});
+
+export const sanctionsSyncFailuresTotal = new Counter({
+  name: "sanctions_sync_failures_total",
+  help: "Total number of failed sanctions list sync attempts",
   registers: [register],
 });
 

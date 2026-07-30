@@ -39,6 +39,8 @@ interface AuthenticatedWebSocket extends WebSocket {
  *  - Heartbeat / ping-pong to clean up stale connections
  *  - Redis pub/sub for horizontal scaling across multiple process instances
  */
+export const TRANSACTION_UPDATES_CHANNEL = "transaction.updates";
+
 export class WebSocketManager {
   private static activeInstance: WebSocketManager | null = null;
 
@@ -53,7 +55,7 @@ export class WebSocketManager {
   private redisPub: RedisClientType | null = null;
   public redisReady: Promise<void>;
 
-  private readonly REDIS_CHANNEL = "transaction.updates";
+  private readonly REDIS_CHANNEL = TRANSACTION_UPDATES_CHANNEL;
   private readonly HEARTBEAT_INTERVAL_MS = 10_000; // faster heartbeat for quicker stale detection
   private readonly MAX_MISSED_PINGS = 2; // number of missed pings before termination
 

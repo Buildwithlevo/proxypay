@@ -32,6 +32,7 @@ import { runIndexReindexJob } from "./indexReindexJob";
 import { runIndexBloatMonitorJob } from "./indexBloatMonitorJob";
 import { runLedgerIntegrityJob } from "./ledgerIntegrityJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
+import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
 interface JobConfig {
@@ -46,6 +47,12 @@ const JOBS: JobConfig[] = [
     // Daily at 1:00 AM - syncs internal sanction list with global lists
     schedule: process.env.SANCTION_SYNC_CRON || "0 1 * * *",
     handler: runSanctionSyncJob,
+  },
+  {
+    name: "retention-purge",
+    // Daily at 1:30 AM - enforces the configured GDPR retention period per data type
+    schedule: process.env.RETENTION_PURGE_CRON || "30 1 * * *",
+    handler: runRetentionPurgeJob,
   },
   {
     name: "cleanup",
@@ -156,26 +163,12 @@ const JOBS: JobConfig[] = [
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
   },
-  ...(INDEX_BLOAT_MONITOR_ENABLED
-    ? [
-        {
-          name: "index-bloat-monitor",
-          // Hourly by default - tracks index bloat and alerts when it exceeds threshold
-          schedule: INDEX_BLOAT_MONITOR_CRON,
-          handler: runIndexBloatMonitorJob,
-        },
-      ]
-    : []),
-  ...(LEDGER_INTEGRITY_JOB_ENABLED
-    ? [
-        {
-          name: "ledger-integrity",
-          // Daily at 7:00 AM by default - validates double-entry ledger integrity
-          schedule: LEDGER_INTEGRITY_CRON,
-          handler: runLedgerIntegrityJob,
-        },
-      ]
-    : []),
+  {
+    name: "travel-rule-audit-report",
+    // Monthly on the 2nd at 5:00 AM - generates previous month's Travel Rule coverage report
+    schedule: process.env.TRAVEL_RULE_AUDIT_REPORT_CRON || "0 5 2 * *",
+    handler: runTravelRuleAuditReportJob,
+  },
 ];
 
 async function runJob(job: JobConfig): Promise<void> {
