@@ -23,8 +23,14 @@ import { runDatabaseBackupVerifyJob } from "./databaseBackupVerifyJob";
 import {
   INDEX_REINDEX_CRON,
   INDEX_REINDEX_JOB_ENABLED,
+  INDEX_BLOAT_MONITOR_CRON,
+  INDEX_BLOAT_MONITOR_ENABLED,
+  LEDGER_INTEGRITY_CRON,
+  LEDGER_INTEGRITY_JOB_ENABLED,
 } from "../config/env";
 import { runIndexReindexJob } from "./indexReindexJob";
+import { runIndexBloatMonitorJob } from "./indexBloatMonitorJob";
+import { runLedgerIntegrityJob } from "./ledgerIntegrityJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
