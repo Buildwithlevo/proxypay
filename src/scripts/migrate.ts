@@ -165,7 +165,27 @@ async function getAppliedVersions(): Promise<Set<string>> {
   return new Set(result.rows.map((r) => r.version));
 }
 
-async function migrateUp(): Promise<void> {
+// ---------------------------------------------------------------------------
+// Pre-flight checks
+// ---------------------------------------------------------------------------
+
+/**
+ * Verifies rollback safety before any pending migration is applied: every
+ * pending migration must have a matching `.down.sql` file. Failing fast here
+ * (before touching the database) keeps schema changes reversible.
+ */
+function verifyRollbackSafety(pending: MigrationFile[]): void {
+  const missingRollback = pending.filter((m) => !m.downPath);
+  if (missingRollback.length > 0) {
+    const names = missingRollback.map((m) => m.name).join(", ");
+    throw new Error(
+      `Pre-flight check failed: missing rollback file (.down.sql) for: ${names}. ` +
+        `Add a rollback file for each migration before applying.`,
+    );
+  }
+}
+
+async function migrateUp(options: { dryRun?: boolean } = {}): Promise<void> {
   await ensureMigrationsTable();
 
   const all = discoverMigrations();
@@ -178,14 +198,27 @@ async function migrateUp(): Promise<void> {
     return;
   }
 
+  verifyRollbackSafety(pending);
+
   for (const migration of pending) {
     const sql = fs.readFileSync(migration.upPath, "utf-8");
-    console.log(`Applying migration ${migration.version}: ${migration.name}`);
+    console.log(
+      `${options.dryRun ? "[dry-run] " : ""}Applying migration ${migration.version}: ${migration.name}`,
+    );
 
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       await client.query(sql);
+
+      if (options.dryRun) {
+        // Verify the migration applies cleanly against the real schema, then
+        // discard the change — nothing is persisted in dry-run mode.
+        await client.query("ROLLBACK");
+        console.log(`  Dry-run OK (rolled back): ${migration.name}`);
+        continue;
+      }
+
       await client.query(
         "INSERT INTO schema_migrations (version) VALUES ($1)",
         [migration.version],
@@ -201,7 +234,11 @@ async function migrateUp(): Promise<void> {
     }
   }
 
-  console.log(`Migration complete. Applied ${pending.length} migration(s).`);
+  console.log(
+    options.dryRun
+      ? `Dry-run complete. ${pending.length} migration(s) verified without applying.`
+      : `Migration complete. Applied ${pending.length} migration(s).`,
+  );
 }
 
 async function migrateDown(): Promise<void> {
@@ -279,12 +316,13 @@ async function migrateStatus(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const command = process.argv[2];
+const dryRun = process.argv.slice(3).includes("--dry-run");
 
 (async () => {
   try {
     switch (command) {
       case "up":
-        await migrateUp();
+        await migrateUp({ dryRun });
         break;
       case "down":
         await migrateDown();
