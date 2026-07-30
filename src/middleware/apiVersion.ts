@@ -21,7 +21,7 @@ export interface VersionedRequest extends Request {
 
 // Current API version
 export const CURRENT_VERSION = "v1";
-export const SUPPORTED_VERSIONS: string[] = ["v1"];
+export const SUPPORTED_VERSIONS: string[] = ["v1", "v2"];
 export const DEPRECATED_VERSIONS: string[] = [];
 
 const normalizeApiVersion = (version: string): string | undefined => {

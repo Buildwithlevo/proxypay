@@ -363,11 +363,16 @@ export class NotificationRouter {
    */
   async routeTransactionNotification(
     transaction: Transaction,
-    status: "completed" | "failed",
+    status: "completed" | "failed" | "retrying",
     errorMessage?: string,
   ): Promise<void> {
     const severity: NotificationSeverity = status === "failed" ? "high" : "medium";
-    const title = status === "failed" ? "Transaction Failed" : "Transaction Completed";
+    const title =
+      status === "failed"
+        ? "Transaction Failed"
+        : status === "retrying"
+          ? "Transaction Retry Scheduled"
+          : "Transaction Completed";
     const message = errorMessage || `Your ${transaction.type} of ${transaction.amount} ${transaction.provider.toUpperCase()} has ${status}`;
 
     await this.routeNotification({
