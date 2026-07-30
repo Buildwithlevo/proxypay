@@ -58,6 +58,7 @@ import {
 import { requireAuth } from "./middleware/auth";
 import { responseTime } from "./middleware/responseTime";
 import { requestId } from "./middleware/requestId";
+import { idempotency } from "./middleware/idempotency";
 import { readReplicaRoutingMiddleware } from "./middleware/readReplicaRouting";
 import { dbConnectionLeakDetector } from "./middleware/dbConnectionLeakDetector";
 import { i18nMiddleware } from "./utils/i18n";
@@ -342,6 +343,11 @@ app.use(validateVersionMiddleware);
 app.use("/oauth", createOAuthRouter());
 app.use("/api/auth", authRoutes);
 
+// Replay retried mutations instead of processing them twice (Idempotency-Key)
+app.use("/api/v1/transactions", idempotency());
+app.use("/api/transactions", idempotency());
+app.use("/api/bulk", idempotency());
+
 app.use("/api/v1/transactions", transactionRoutesV1);
 app.use("/api/v1/transactions", transactionDisputeRoutesV1);
 app.use("/api/v1/transactions/bulk", bulkRoutesV1);
@@ -374,6 +380,8 @@ app.use("/api/transactions", (req: VersionedRequest, res, next) => {
 });
 app.use("/api/transactions", transactionDisputeRoutes);
 app.use("/api/transactions/bulk", bulkRoutes);
+// Alias so bulk operations can be polled at /api/bulk/:jobId/status
+app.use("/api/bulk", bulkRoutes);
 app.use("/api/disputes", disputeRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
