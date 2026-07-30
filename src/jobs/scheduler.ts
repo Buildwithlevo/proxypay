@@ -25,9 +25,12 @@ import {
   INDEX_REINDEX_JOB_ENABLED,
   INDEX_BLOAT_MONITOR_CRON,
   INDEX_BLOAT_MONITOR_ENABLED,
+  LEDGER_INTEGRITY_CRON,
+  LEDGER_INTEGRITY_JOB_ENABLED,
 } from "../config/env";
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runIndexBloatMonitorJob } from "./indexBloatMonitorJob";
+import { runLedgerIntegrityJob } from "./ledgerIntegrityJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
@@ -160,6 +163,16 @@ const JOBS: JobConfig[] = [
           // Hourly by default - tracks index bloat and alerts when it exceeds threshold
           schedule: INDEX_BLOAT_MONITOR_CRON,
           handler: runIndexBloatMonitorJob,
+        },
+      ]
+    : []),
+  ...(LEDGER_INTEGRITY_JOB_ENABLED
+    ? [
+        {
+          name: "ledger-integrity",
+          // Daily at 7:00 AM by default - validates double-entry ledger integrity
+          schedule: LEDGER_INTEGRITY_CRON,
+          handler: runLedgerIntegrityJob,
         },
       ]
     : []),
