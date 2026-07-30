@@ -26,7 +26,7 @@ import {
 } from "../config/env";
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
-import { runTravelRuleAuditReportJob } from "./travelRuleAuditReportJob";
+import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
 interface JobConfig {
@@ -41,6 +41,12 @@ const JOBS: JobConfig[] = [
     // Daily at 1:00 AM - syncs internal sanction list with global lists
     schedule: process.env.SANCTION_SYNC_CRON || "0 1 * * *",
     handler: runSanctionSyncJob,
+  },
+  {
+    name: "retention-purge",
+    // Daily at 1:30 AM - enforces the configured GDPR retention period per data type
+    schedule: process.env.RETENTION_PURGE_CRON || "30 1 * * *",
+    handler: runRetentionPurgeJob,
   },
   {
     name: "cleanup",

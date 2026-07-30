@@ -27,4 +27,11 @@ export async function runCleanupJob(): Promise<void> {
   console.log(
     `[cleanup] Released ${expiredKeyCount} expired idempotency key(s)`,
   );
+
+  const idempotencyResult = await pool.query(
+    `DELETE FROM idempotency_keys WHERE expires_at <= CURRENT_TIMESTAMP`,
+  );
+  console.log(
+    `[cleanup] Deleted ${idempotencyResult?.rowCount ?? 0} expired idempotency key record(s)`,
+  );
 }
