@@ -88,6 +88,7 @@ import settingsRoutes from "./routes/settings";
 import { statementsRoutes } from "./routes/statements";
 import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
+import { transactionStreamRoutes } from "./routes/stream";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
 
@@ -349,6 +350,7 @@ app.use("/api/v1/stats", statsRoutesV1);
 app.use("/api/v1/vaults", vaultRoutesV1);
 app.use("/api/v1/compliance/travel-rule", travelRuleRoutes);
 app.use("/api/v2/transactions", transactionRoutesV2);
+app.use("/api/stream", transactionStreamRoutes);
 
 app.use("/api/transactions", (req: VersionedRequest, res, next) => {
   // Route by the negotiated version (URL path takes priority in
