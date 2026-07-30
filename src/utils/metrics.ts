@@ -236,3 +236,70 @@ export const systemHeartbeat = new Gauge({
   labelNames: ["service"],
   registers: [register],
 });
+
+// BullMQ Queue Depth Metrics
+export const queueWaitingJobs = new Gauge({
+  name: "bullmq_queue_waiting_jobs",
+  help: "Number of waiting jobs in the BullMQ queue",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+export const queueActiveJobs = new Gauge({
+  name: "bullmq_queue_active_jobs",
+  help: "Number of active jobs in the BullMQ queue",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+export const queueCompletedJobs = new Gauge({
+  name: "bullmq_queue_completed_jobs",
+  help: "Number of completed jobs in the BullMQ queue",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+export const queueFailedJobs = new Gauge({
+  name: "bullmq_queue_failed_jobs",
+  help: "Number of failed jobs in the BullMQ queue",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+export const queueDelayedJobs = new Gauge({
+  name: "bullmq_queue_delayed_jobs",
+  help: "Number of delayed jobs in the BullMQ queue",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+export const queueIsPaused = new Gauge({
+  name: "bullmq_queue_is_paused",
+  help: "Whether the BullMQ queue is paused (1=paused, 0=not paused)",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+// Worker Availability Metrics
+export const workerAvailable = new Gauge({
+  name: "bullmq_worker_available",
+  help: "Whether a worker is currently active for the queue (1=active, 0=inactive)",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+// Job Processing Metrics
+export const jobDurationSeconds = new Histogram({
+  name: "bullmq_job_duration_seconds",
+  help: "Duration of BullMQ job processing in seconds",
+  labelNames: ["queue", "job_name", "status"],
+  buckets: [0.1, 0.5, 1, 3, 5, 10, 30, 60, 120, 300],
+  registers: [register],
+});
+
+export const jobsTotal = new Counter({
+  name: "bullmq_jobs_total",
+  help: "Total number of BullMQ jobs processed",
+  labelNames: ["queue", "job_name", "status"],
+  registers: [register],
+});

@@ -564,12 +564,16 @@ async function initializeRuntime(): Promise<void> {
     await import("./queue/health.js");
   const { queueDepthHandler, queueDepthPrometheusHandler } =
     await import("./queue/queueDepthMetrics.js");
+  const { startQueueMetricsCollection, stopQueueMetricsCollection } =
+    await import("./queue/index.js");
 
   app.get("/health/queue", getQueueHealth);
   app.get("/health/queue/depth", queueDepthHandler);
   app.get("/metrics/queue_depth", queueDepthPrometheusHandler);
   app.post("/admin/queues/pause", pauseQueueEndpoint);
   app.post("/admin/queues/resume", resumeQueueEndpoint);
+
+  startQueueMetricsCollection();
 
   try {
     await connectRedis();
