@@ -23,8 +23,11 @@ import { runDatabaseBackupVerifyJob } from "./databaseBackupVerifyJob";
 import {
   INDEX_REINDEX_CRON,
   INDEX_REINDEX_JOB_ENABLED,
+  INDEX_BLOAT_MONITOR_CRON,
+  INDEX_BLOAT_MONITOR_ENABLED,
 } from "../config/env";
 import { runIndexReindexJob } from "./indexReindexJob";
+import { runIndexBloatMonitorJob } from "./indexBloatMonitorJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
@@ -150,6 +153,16 @@ const JOBS: JobConfig[] = [
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
   },
+  ...(INDEX_BLOAT_MONITOR_ENABLED
+    ? [
+        {
+          name: "index-bloat-monitor",
+          // Hourly by default - tracks index bloat and alerts when it exceeds threshold
+          schedule: INDEX_BLOAT_MONITOR_CRON,
+          handler: runIndexBloatMonitorJob,
+        },
+      ]
+    : []),
 ];
 
 async function runJob(job: JobConfig): Promise<void> {

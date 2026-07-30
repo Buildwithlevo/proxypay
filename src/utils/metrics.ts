@@ -210,6 +210,21 @@ export const crossChainAnomalyTotal = new Counter({
   registers: [register],
 });
 
+// Index Bloat Monitoring Metrics
+export const indexBloatPercentage = new Gauge({
+  name: "index_bloat_percentage",
+  help: "Estimated bloat percentage for a PostgreSQL index",
+  labelNames: ["schemaname", "tablename", "indexname"],
+  registers: [register],
+});
+
+// Ledger Integrity Metrics
+export const ledgerIntegrityScore = new Gauge({
+  name: "ledger_integrity_score",
+  help: "Double-entry ledger integrity score (100=fully balanced)",
+  registers: [register],
+});
+
 // System Heartbeat Metric
 export const systemHeartbeat = new Gauge({
   name: "system_heartbeat",
