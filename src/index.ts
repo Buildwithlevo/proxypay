@@ -368,6 +368,8 @@ app.use(
 );
 app.use("/api/transactions", transactionDisputeRoutes);
 app.use("/api/transactions/bulk", bulkRoutes);
+// Alias so bulk operations can be polled at /api/bulk/:jobId/status
+app.use("/api/bulk", bulkRoutes);
 app.use("/api/disputes", disputeRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
