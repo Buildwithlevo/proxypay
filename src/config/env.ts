@@ -47,6 +47,32 @@ export const env = cleanEnv(process.env, {
     default: 5,
     desc: "Maximum active queries allowed in the database before the automatic index reindex job is skipped",
   }),
+  INDEX_BLOAT_MONITOR_ENABLED: bool({
+    default: true,
+    desc: "Whether the index bloat monitoring job should run",
+  }),
+  INDEX_BLOAT_MONITOR_CRON: str({
+    default: "0 * * * *",
+    desc: "Cron schedule for the index bloat monitoring job",
+    example: "0 * * * *",
+  }),
+  INDEX_BLOAT_MIN_SIZE_MB: num({
+    default: 10,
+    desc: "Minimum size in MB for an index to be evaluated for bloat",
+  }),
+  INDEX_BLOAT_ALERT_THRESHOLD_PCT: num({
+    default: 30,
+    desc: "Bloat percentage that triggers an alert",
+  }),
+  LEDGER_INTEGRITY_JOB_ENABLED: bool({
+    default: true,
+    desc: "Whether the ledger entry integrity validation job should run",
+  }),
+  LEDGER_INTEGRITY_CRON: str({
+    default: "0 7 * * *",
+    desc: "Cron schedule for the ledger entry integrity validation job",
+    example: "0 7 * * *",
+  }),
   STELLAR_ISSUER_SECRET: str({
     desc: "Stellar secret key for the issuer account",
     example: "S...",
@@ -156,6 +182,12 @@ export const {
   INDEX_REINDEX_MIN_SIZE_MB,
   INDEX_REINDEX_MAX_SCAN_COUNT,
   INDEX_REINDEX_MAX_ACTIVE_CONNECTIONS,
+  INDEX_BLOAT_MONITOR_ENABLED,
+  INDEX_BLOAT_MONITOR_CRON,
+  INDEX_BLOAT_MIN_SIZE_MB,
+  INDEX_BLOAT_ALERT_THRESHOLD_PCT,
+  LEDGER_INTEGRITY_JOB_ENABLED,
+  LEDGER_INTEGRITY_CRON,
   QUICKBOOKS_CLIENT_ID,
   QUICKBOOKS_CLIENT_SECRET,
   QUICKBOOKS_REDIRECT_URI,

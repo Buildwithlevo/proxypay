@@ -23,9 +23,16 @@ import { runDatabaseBackupVerifyJob } from "./databaseBackupVerifyJob";
 import {
   INDEX_REINDEX_CRON,
   INDEX_REINDEX_JOB_ENABLED,
+  INDEX_BLOAT_MONITOR_CRON,
+  INDEX_BLOAT_MONITOR_ENABLED,
+  LEDGER_INTEGRITY_CRON,
+  LEDGER_INTEGRITY_JOB_ENABLED,
 } from "../config/env";
 import { runIndexReindexJob } from "./indexReindexJob";
+import { runIndexBloatMonitorJob } from "./indexBloatMonitorJob";
+import { runLedgerIntegrityJob } from "./ledgerIntegrityJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
+import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
 interface JobConfig {
@@ -40,6 +47,12 @@ const JOBS: JobConfig[] = [
     // Daily at 1:00 AM - syncs internal sanction list with global lists
     schedule: process.env.SANCTION_SYNC_CRON || "0 1 * * *",
     handler: runSanctionSyncJob,
+  },
+  {
+    name: "retention-purge",
+    // Daily at 1:30 AM - enforces the configured GDPR retention period per data type
+    schedule: process.env.RETENTION_PURGE_CRON || "30 1 * * *",
+    handler: runRetentionPurgeJob,
   },
   {
     name: "cleanup",
@@ -149,6 +162,12 @@ const JOBS: JobConfig[] = [
     // Daily at 3:00 AM
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
+  },
+  {
+    name: "travel-rule-audit-report",
+    // Monthly on the 2nd at 5:00 AM - generates previous month's Travel Rule coverage report
+    schedule: process.env.TRAVEL_RULE_AUDIT_REPORT_CRON || "0 5 2 * *",
+    handler: runTravelRuleAuditReportJob,
   },
 ];
 

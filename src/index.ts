@@ -27,6 +27,7 @@ import {
   transactionRoutesV1,
   vaultRoutesV1,
 } from "./routes/v1";
+import { transactionRoutesV2 } from "./routes/v2";
 import { transactionRoutes } from "./routes/transactions";
 import { authRoutes } from "./routes/auth";
 import { bulkRoutes } from "./routes/bulk";
@@ -57,6 +58,7 @@ import {
 import { requireAuth } from "./middleware/auth";
 import { responseTime } from "./middleware/responseTime";
 import { requestId } from "./middleware/requestId";
+import { idempotency } from "./middleware/idempotency";
 import { readReplicaRoutingMiddleware } from "./middleware/readReplicaRouting";
 import { dbConnectionLeakDetector } from "./middleware/dbConnectionLeakDetector";
 import { i18nMiddleware } from "./utils/i18n";
@@ -87,6 +89,7 @@ import settingsRoutes from "./routes/settings";
 import { statementsRoutes } from "./routes/statements";
 import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
+import { transactionStreamRoutes } from "./routes/stream";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
 
@@ -340,6 +343,11 @@ app.use(validateVersionMiddleware);
 app.use("/oauth", createOAuthRouter());
 app.use("/api/auth", authRoutes);
 
+// Replay retried mutations instead of processing them twice (Idempotency-Key)
+app.use("/api/v1/transactions", idempotency());
+app.use("/api/transactions", idempotency());
+app.use("/api/bulk", idempotency());
+
 app.use("/api/v1/transactions", transactionRoutesV1);
 app.use("/api/v1/transactions", transactionDisputeRoutesV1);
 app.use("/api/v1/transactions/bulk", bulkRoutesV1);
@@ -347,27 +355,33 @@ app.use("/api/v1/disputes", disputeRoutesV1);
 app.use("/api/v1/stats", statsRoutesV1);
 app.use("/api/v1/vaults", vaultRoutesV1);
 app.use("/api/v1/compliance/travel-rule", travelRuleRoutes);
+app.use("/api/v2/transactions", transactionRoutesV2);
+app.use("/api/stream", transactionStreamRoutes);
 
-app.use(
-  "/api/transactions",
-  (req: VersionedRequest, res, next) => {
-    req.apiVersion = "v1";
-    res.setHeader("API-Version", "v1");
-    res.setHeader("Deprecation", "true");
-    res.setHeader(
-      "Sunset",
-      new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toUTCString(),
-    );
-    res.setHeader(
-      "Url",
-      `https://example.com${req.originalUrl.replace("/api/", "/api/v1/")}`,
-    );
-    next();
-  },
-  transactionRoutes,
-);
+app.use("/api/transactions", (req: VersionedRequest, res, next) => {
+  // Route by the negotiated version (URL path takes priority in
+  // apiVersionMiddleware; falls back to Accept-Version/Accept headers).
+  if (req.apiVersion === "v2") {
+    return transactionRoutesV2(req, res, next);
+  }
+
+  req.apiVersion = "v1";
+  res.setHeader("API-Version", "v1");
+  res.setHeader("Deprecation", "true");
+  res.setHeader(
+    "Sunset",
+    new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toUTCString(),
+  );
+  res.setHeader(
+    "Url",
+    `https://example.com${req.originalUrl.replace("/api/", "/api/v1/")}`,
+  );
+  return transactionRoutes(req, res, next);
+});
 app.use("/api/transactions", transactionDisputeRoutes);
 app.use("/api/transactions/bulk", bulkRoutes);
+// Alias so bulk operations can be polled at /api/bulk/:jobId/status
+app.use("/api/bulk", bulkRoutes);
 app.use("/api/disputes", disputeRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
@@ -550,12 +564,16 @@ async function initializeRuntime(): Promise<void> {
     await import("./queue/health.js");
   const { queueDepthHandler, queueDepthPrometheusHandler } =
     await import("./queue/queueDepthMetrics.js");
+  const { startQueueMetricsCollection, stopQueueMetricsCollection } =
+    await import("./queue/index.js");
 
   app.get("/health/queue", getQueueHealth);
   app.get("/health/queue/depth", queueDepthHandler);
   app.get("/metrics/queue_depth", queueDepthPrometheusHandler);
   app.post("/admin/queues/pause", pauseQueueEndpoint);
   app.post("/admin/queues/resume", resumeQueueEndpoint);
+
+  startQueueMetricsCollection();
 
   try {
     await connectRedis();
