@@ -3,31 +3,58 @@ import { RateLimiterRedis } from "rate-limiter-flexible";
 import { redisClient } from "../config/redis";
 
 // Define tiers
-const freeTier = {
-  points: 100, // 100 requests
-  duration: 60, // per 60 seconds
-  keyPrefix: "rl_free"
-};
-const proTier = {
-  points: 1000, // 1000 requests
-  duration: 60, // per 60 seconds
-  keyPrefix: "rl_pro"
+export type UserTier = "free" | "pro" | "enterprise";
+
+export interface TierConfig {
+  points: number;
+  duration: number;
+  keyPrefix: string;
+}
+
+export const TIER_CONFIGS: Record<UserTier, TierConfig> = {
+  free: {
+    points: 100, // 100 requests
+    duration: 60, // per 60 seconds
+    keyPrefix: "rl_free"
+  },
+  pro: {
+    points: 1000, // 1000 requests
+    duration: 60, // per 60 seconds
+    keyPrefix: "rl_pro"
+  },
+  enterprise: {
+    points: 10000, // 10000 requests
+    duration: 60, // per 60 seconds
+    keyPrefix: "rl_enterprise"
+  },
 };
 
-const freeLimiter = new RateLimiterRedis({
-  storeClient: redisClient,
-  ...freeTier,
-});
-const proLimiter = new RateLimiterRedis({
-  storeClient: redisClient,
-  ...proTier,
-});
+const limiters = new Map<UserTier, RateLimiterRedis>();
 
-function getTier(req: Request) {
-  // Example: check req.user or req.jwtUser for tier
-  // Default to free if not authenticated
-  if (req.user && (req.user as any).tier === "pro") return "pro";
-  if (req.jwtUser && (req.jwtUser as any).tier === "pro") return "pro";
+function getLimiter(tier: UserTier): RateLimiterRedis {
+  if (!limiters.has(tier)) {
+    const config = TIER_CONFIGS[tier];
+    limiters.set(tier, new RateLimiterRedis({
+      storeClient: redisClient,
+      ...config,
+    }));
+  }
+  return limiters.get(tier)!;
+}
+
+function getTier(req: Request): UserTier {
+  // Check user tier from JWT or session
+  // Default to free if not authenticated or tier not specified
+  const user = req.user as any;
+  const jwtUser = req.jwtUser as any;
+  
+  const tier = user?.tier || jwtUser?.tier || "free";
+  
+  // Validate tier
+  if (["free", "pro", "enterprise"].includes(tier)) {
+    return tier as UserTier;
+  }
+  
   return "free";
 }
 
@@ -36,7 +63,7 @@ export async function rateLimitMiddleware(req: Request, res: Response, next: Nex
   const userId = req.jwtUser?.userId || req.user?.id;
   const tier = getTier(req);
   const key = userId ? `${tier}:${userId}` : `${tier}:ip:${ip}`;
-  const limiter = tier === "pro" ? proLimiter : freeLimiter;
+  const limiter = getLimiter(tier);
 
   try {
     await limiter.consume(key);
@@ -46,7 +73,18 @@ export async function rateLimitMiddleware(req: Request, res: Response, next: Nex
     res.set("Retry-After", String(retrySecs));
     res.status(429).json({
       error: "Too Many Requests",
-      message: `Rate limit exceeded. Try again in ${retrySecs} seconds.`,
+      message: `Rate limit exceeded for ${tier} tier. Try again in ${retrySecs} seconds.`,
+      tier,
+      limit: TIER_CONFIGS[tier].points,
+      windowSeconds: TIER_CONFIGS[tier].duration,
     });
   }
+}
+
+export function getTierConfig(tier: UserTier): TierConfig {
+  return TIER_CONFIGS[tier];
+}
+
+export function getTierFromRequest(req: Request): UserTier {
+  return getTier(req);
 }
