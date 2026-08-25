@@ -48,6 +48,7 @@ import {
   createRedisStore,
   SESSION_TTL_SECONDS,
 } from "./config/redis";
+import { rateLimitMiddleware } from "./middleware/rateLimitRedis";
 import { createOAuthRouter } from "./auth/oauth";
 import { pool } from "./config/database";
 import {
@@ -124,9 +125,9 @@ if (process.env.SENTRY_DSN) {
   Sentry.setupExpressErrorHandler(app);
 }
 
-// import rateLimitMiddleware from "./middleware/rateLimit"; // TODO: Commented out because the module has no default export and I don't know each middleware was .
-
 app.use(sentryBreadcrumbMiddleware);
+
+app.use(rateLimitMiddleware);
 
 app.use(metricsMiddleware);
 app.use(helmet());
