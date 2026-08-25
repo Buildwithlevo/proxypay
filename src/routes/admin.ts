@@ -3199,4 +3199,87 @@ router.get(
   },
 );
 
+import { reprocessingService } from "../services/reprocessingService";
+import { startReprocessingWorker, scheduleReprocessingPoller } from "../queue/reprocessingQueue";
+
+router.post(
+  "/reprocessing/enqueue",
+  requireAdmin,
+  logAdminAction("REPROCESSING_ENQUEUE"),
+  async (req: Request, res: Response) => {
+    try {
+      const { transactionId, provider } = req.body;
+      if (!transactionId || !provider) {
+        throw createError(ERROR_CODES.MISSING_FIELD, "transactionId and provider are required");
+      }
+      const job = await reprocessingService.enqueueFailedTransaction(transactionId, provider);
+      res.status(201).json({ success: true, data: job });
+    } catch (error) {
+      console.error("[Reprocessing] Enqueue failed:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to enqueue transaction for reprocessing");
+    }
+  },
+);
+
+router.get(
+  "/reprocessing/stats",
+  requireAdmin,
+  logAdminAction("GET_REPROCESSING_STATS"),
+  async (_req: Request, res: Response) => {
+    try {
+      const stats = await reprocessingService.getJobStats();
+      res.json({ success: true, data: stats });
+    } catch (error) {
+      console.error("[Reprocessing] Stats fetch failed:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch reprocessing stats");
+    }
+  },
+);
+
+router.get(
+  "/reprocessing/jobs",
+  requireAdmin,
+  logAdminAction("GET_REPROCESSING_JOBS"),
+  async (req: Request, res: Response) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const jobs = await reprocessingService.getPendingJobs(limit);
+      res.json({ success: true, data: jobs });
+    } catch (error) {
+      console.error("[Reprocessing] List jobs failed:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch reprocessing jobs");
+    }
+  },
+);
+
+router.post(
+  "/reprocessing/:jobId/cancel",
+  requireAdmin,
+  logAdminAction("REPROCESSING_CANCEL"),
+  async (req: Request, res: Response) => {
+    try {
+      await reprocessingService.cancelJob(req.params.jobId);
+      res.json({ success: true, message: "Job cancelled" });
+    } catch (error) {
+      console.error("[Reprocessing] Cancel failed:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to cancel reprocessing job");
+    }
+  },
+);
+
+router.put(
+  "/reprocessing/policies/:provider",
+  requireAdmin,
+  logAdminAction("UPDATE_REPROCESSING_POLICY"),
+  async (req: Request, res: Response) => {
+    try {
+      const policy = await reprocessingService.updatePolicy(req.params.provider, req.body);
+      res.json({ success: true, data: policy });
+    } catch (error) {
+      console.error("[Reprocessing] Policy update failed:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to update reprocessing policy");
+    }
+  },
+);
+
 export { router as adminRoutes };

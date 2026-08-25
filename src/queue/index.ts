@@ -85,5 +85,12 @@ export {
   closeAccountingTokenRefreshWorker,
 };
 
+// Reprocessing Queue Exports
+export {
+  REPROCESSING_QUEUE_NAME,
+  startReprocessingWorker,
+  scheduleReprocessingPoller,
+} from "./reprocessingQueue";
+
 // Trace-ID propagation utilities
 export { withTraceId, traceIdFromJob, childLoggerWithTrace, TRACE_ID_KEY } from "./trace";

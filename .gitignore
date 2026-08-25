@@ -48,3 +48,17 @@ benchmarks/results/*.json
 .cache/
 
 secret.yaml
+
+# Test snapshots and artifacts
+__snapshots__/
+*.snap
+snapshots/
+test-results/
+playwright-report/
+coverage/
+.nyc_output/
+stryker-tmp/
+stryker-tmp-*/
+
+# Jest artifacts
+.jest-cache/

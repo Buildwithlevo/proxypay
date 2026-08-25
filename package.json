@@ -67,7 +67,7 @@
     "*.{js,cjs,mjs,json,md,yml,yaml}": "prettier --write"
   },
   "keywords": [],
-  "author": "",
+  "author": "weare",
   "license": "MIT",
   "dependencies": {
     "@apollo/client": "^4.2.1",
