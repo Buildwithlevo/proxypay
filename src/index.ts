@@ -65,7 +65,8 @@ import { i18nMiddleware } from "./utils/i18n";
 import { metricsMiddleware } from "./middleware/metrics";
 import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
 import { sessionAnomalyLogger } from "./services/logger";
-import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
+import { HealthCheckResponse, ReadinessCheckResponse, ProviderHealthSummary } from "./types/api";
+import { checkMobileMoneyHealth, ProviderName } from "./services/mobilemoney/providers/healthCheck";
 import { privacyRoutes } from "./routes/privacy";
 import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
@@ -225,11 +226,59 @@ app.use(
 );
 app.use(sessionAnomalyLogger);
 
-app.get("/health", (_req: Request, res: Response) => {
+/**
+ * Get aggregated provider health summary
+ */
+async function getProviderHealthSummary(): Promise<ProviderHealthSummary> {
+  try {
+    const healthResult = await checkMobileMoneyHealth();
+    const providers = healthResult.providers;
+    const providerNames = Object.keys(providers) as ProviderName[];
+    
+    const providerStatus: Record<string, "up" | "down" | "unknown"> = {};
+    let healthyCount = 0;
+    
+    for (const name of providerNames) {
+      const status = providers[name]?.status ?? "unknown";
+      providerStatus[name] = status;
+      if (status === "up") healthyCount++;
+    }
+    
+    const totalCount = providerNames.length;
+    let overall: "healthy" | "degraded" | "down";
+    
+    if (healthyCount === totalCount) {
+      overall = "healthy";
+    } else if (healthyCount > 0) {
+      overall = "degraded";
+    } else {
+      overall = "down";
+    }
+    
+    return {
+      overall,
+      providers: providerStatus,
+      healthyCount,
+      totalCount,
+    };
+  } catch (err) {
+    console.error("Provider health check failed", err);
+    return {
+      overall: "unknown",
+      providers: {},
+      healthyCount: 0,
+      totalCount: 0,
+    };
+  }
+}
+
+app.get("/health", async (_req: Request, res: Response) => {
+  const providerHealth = await getProviderHealthSummary();
   const body: HealthCheckResponse = {
     status: "ok",
     timestamp: new Date().toISOString(),
     gitHash: process.env.BUILD_HASH,
+    providers: providerHealth,
   };
   res.json(body);
 });
@@ -316,6 +365,21 @@ app.get("/health/lb", async (req: Request, res: Response) => {
     }
   } catch (err) {
     healthy = false;
+  }
+
+  // Check provider health
+  try {
+    const providerHealth = await getProviderHealthSummary();
+    checks.providers = providerHealth.overall;
+    if (providerHealth.overall === "down") {
+      healthy = false;
+    } else if (providerHealth.overall === "degraded") {
+      // Don't mark as unhealthy, but track it
+      checks.providersDetail = JSON.stringify(providerHealth.providers);
+    }
+  } catch (err) {
+    console.error("Provider health check failed", err);
+    checks.providers = "error";
   }
 
   const memUsage = process.memoryUsage();
