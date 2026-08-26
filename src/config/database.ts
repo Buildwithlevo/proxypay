@@ -2,6 +2,12 @@ import { Pool, QueryConfig, QueryResult, QueryResultRow, PoolClient } from "pg";
 import { auditService } from "../services/auditlogService";
 import { isReadOnlyQuery } from "../utils/readOnlyDetector";
 import { dbReplicaLagSeconds, dbReplicaReadEnabled } from "../utils/metrics";
+import {
+  markReplicaUnhealthy,
+  markReplicaHealthy,
+  getReplicaHealthStates,
+  executeWithRetry,
+} from "../middleware/readReplicaRouting";
 import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
 
 const DR_DATABASE_URL = process.env.DR_DATABASE_URL;
@@ -296,9 +302,11 @@ async function refreshReplicaStatus(idx: number): Promise<void> {
     const result = await client.query<{ lag_seconds: number | null }>(query);
     lagSeconds = result.rows?.[0]?.lag_seconds ?? null;
     healthy = true;
+    markReplicaHealthy(url);
   } catch (error) {
     healthy = false;
     lagSeconds = null;
+    markReplicaUnhealthy(url, error instanceof Error ? error.message : String(error));
     console.warn(`Replica health check failed for ${url}:`, error);
   } finally {
     client?.release();
@@ -326,9 +334,8 @@ function startReplicaLagMonitor(): void {
 startReplicaLagMonitor();
 
 /**
- * Execute a read-only SQL query against a replica pool if available.
- * If the replica is unreachable (pool error or connection failure) the query
- * automatically falls over to the primary pool so callers are unaffected.
+ * Execute a read-only SQL query against a replica pool with retry and fallback.
+ * If the replica fails, retries with exponential backoff and falls back to primary.
  *
  * @param text   - The parameterised SQL query string
  * @param params - Optional query parameters
@@ -342,14 +349,22 @@ export async function queryRead<T extends import("pg").QueryResultRow = any>(
   if (replicaPool) {
     let client: PoolClient | null = null;
     try {
-      client = await replicaPool.connect();
-      const result = await client.query<T>(text, params);
+      const { result, attempts } = await executeWithRetry(
+        async () => {
+          client = await replicaPool.connect();
+          return client.query<T>(text, params);
+        },
+        { replicaUrl: "replica", operation: text.slice(0, 100) },
+      );
+
+      // Release client after successful query
+      client?.release();
       return result;
     } catch (err) {
-      // Log replica failure and fall back to primary
-      console.warn("Read replica query failed, falling back to primary:", err);
-    } finally {
       client?.release();
+
+      // Log replica failure and fall back to primary
+      console.warn("Read replica query failed after retries, falling back to primary:", err);
     }
   }
 

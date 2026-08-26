@@ -35,6 +35,7 @@ import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { runTravelRuleAuditReportJob } from "./travelRuleAuditReportJob";
 import { runRedisKeyExpirationMonitorJob } from "./redisKeyExpirationJob";
+import { runIdempotencyCleanupJob } from "./idempotencyCleanupJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
 interface JobConfig {
@@ -176,6 +177,12 @@ const JOBS: JobConfig[] = [
     // Every 10 minutes - monitors Redis memory/eviction and cleans up orphaned keys
     schedule: process.env.REDIS_EXPIRY_MONITOR_CRON || "*/10 * * * *",
     handler: runRedisKeyExpirationMonitorJob,
+  },
+  {
+    name: "idempotency-cleanup",
+    // Daily at 3:00 AM - purges expired idempotency keys in batches
+    schedule: process.env.IDEMPOTENCY_CLEANUP_CRON || "0 3 * * *",
+    handler: runIdempotencyCleanupJob,
   },
 ];
 
