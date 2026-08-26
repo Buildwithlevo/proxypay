@@ -27,6 +27,10 @@ import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { generateTransactionPdfBuffer } from "../services/pdfReceipt";
 import { generateShareToken, verifyShareToken } from "../utils/share";
 import { createExportRoutes } from "./export";
+import {
+  previewTransactionHandler,
+  validateTransactionPreview,
+} from "../controllers/transactionPreviewController";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
 
@@ -192,6 +196,20 @@ transactionRoutes.get(
       );
     }
   },
+);
+
+// Preview a transaction before submission — simulates fees/limits, creates nothing.
+transactionRoutes.post(
+  "/preview",
+  authenticateToken,
+  checkAccountStatusStrict,
+  geoFencingMiddleware,
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  normalizeProvider,
+  validateTransactionPreview,
+  validateNetworkMiddleware,
+  previewTransactionHandler,
 );
 
 transactionRoutes.get(
