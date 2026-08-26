@@ -89,6 +89,10 @@ import settingsRoutes from "./routes/settings";
 import { statementsRoutes } from "./routes/statements";
 import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
+import providerHealthRouter from "./routes/providerHealthRoutes";
+import kycWebhookRouter from "./routes/kycWebhookRoutes";
+import twoFactorRouter from "./routes/twoFactorRoutes";
+import transactionMetadataRouter from "./routes/transactionMetadataRoutes";
 import { transactionStreamRoutes } from "./routes/stream";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
@@ -405,8 +409,16 @@ app.use("/api/gdpr", privacyRoutes);
 app.use("/api/developer", developerDashboardRoutes);
 app.use("/api/admin", requireAuth, adminRoutes);
 app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
+// #405 – Provider Health Dashboard
+app.use("/api/admin/providers/health", requireAuth, providerHealthRouter);
 app.use("/api/admin/kyc-upgrades", requireAuth, kycTierUpgradeRoutes);
 app.use("/api/admin/auth", createAdminSep10Router());
+// #402 – KYC Webhook Callbacks
+app.use("/api/kyc/webhooks", kycWebhookRouter);
+// #403 – Transaction Metadata Search
+app.use("/api/transactions/metadata", transactionMetadataRouter);
+// #404 – 2FA Multi-method
+app.use("/api/auth/2fa", twoFactorRouter);
 app.use("/sep10", createSep10Router());
 app.use("/sep31", sep31Router);
 app.use("/sep24", sep24Router);

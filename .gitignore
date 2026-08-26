@@ -23,6 +23,14 @@ coverage/
 .nyc_output/
 stryker-tmp/
 
+# Test snapshots
+**/__snapshots__/
+*.snap
+
+# Jest cache
+.jest-cache/
+jest_cache/
+
 # Logs
 *.log
 pact.log
@@ -36,8 +44,6 @@ pact.log
 # Kiro
 .kiro/
 
-
-
 # Load test output
 tests/load/results/*.json
 benchmarks/results/*.json
@@ -47,18 +53,20 @@ benchmarks/results/*.json
 *.temp
 .cache/
 
+# Secrets
 secret.yaml
 
-# Test snapshots and artifacts
-__snapshots__/
-*.snap
-snapshots/
-test-results/
+# Playwright test artifacts
 playwright-report/
-coverage/
-.nyc_output/
-stryker-tmp/
-stryker-tmp-*/
+test-results/
+playwright/.cache/
 
-# Jest artifacts
-.jest-cache/
+# Stryker mutation testing
+.stryker-tmp/
+reports/mutation/
+
+# Local development overrides
+docker-compose.override.yml
+
+# TypeScript diagnostics
+tsconfig.tsbuildinfo

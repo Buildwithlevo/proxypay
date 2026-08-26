@@ -9,6 +9,9 @@ import {
   DashboardConfig,
   validateDashboardConfig,
   DASHBOARD_CONFIG_VALIDATION_ERRORS,
+  reorderWidgets,
+  toggleWidgetVisibility,
+  setWidgetRefreshRate,
 } from "../utils/dashboardConfig";
 import { auditInterceptor } from "../middleware/auditInterceptor";
 import {
@@ -1062,6 +1065,150 @@ router.put(
       userId: user.id,
       config: user.dashboard_config,
     });
+  },
+);
+
+// GET /api/admin/dashboard/config — get current user's dashboard config
+router.get(
+  "/dashboard/config",
+  requireAdmin,
+  logAdminAction("GET_MY_DASHBOARD_CONFIG"),
+  (req: Request, res: Response) => {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.id;
+    const user = users.find((u) => u.id === userId);
+    const config: DashboardConfig = (user?.dashboard_config) || {
+      layout: "grid",
+      widgets: [],
+    };
+    res.json({ userId, config });
+  },
+);
+
+// PUT /api/admin/dashboard/config — replace entire dashboard config
+router.put(
+  "/dashboard/config",
+  requireAdmin,
+  logAdminAction("PUT_MY_DASHBOARD_CONFIG"),
+  (req: Request, res: Response) => {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.id;
+    const { config } = req.body;
+
+    if (!validateDashboardConfig(config)) {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "Invalid dashboard configuration",
+        {
+          message: "Invalid dashboard configuration",
+          errors: DASHBOARD_CONFIG_VALIDATION_ERRORS,
+        },
+      );
+    }
+
+    let user = users.find((u) => u.id === userId);
+    if (!user) {
+      user = { id: userId as string, role: authReq.user?.role || "admin" };
+      users.push(user);
+    }
+    user.dashboard_config = config;
+
+    res.json({ message: "Dashboard configuration saved", userId, config });
+  },
+);
+
+// PATCH /api/admin/dashboard/widgets/reorder — reorder widgets
+router.patch(
+  "/dashboard/widgets/reorder",
+  requireAdmin,
+  logAdminAction("REORDER_DASHBOARD_WIDGETS"),
+  (req: Request, res: Response) => {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.id;
+    const { fromIndex, toIndex } = req.body;
+
+    if (typeof fromIndex !== "number" || typeof toIndex !== "number") {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "fromIndex and toIndex must be numbers",
+        { message: "fromIndex and toIndex must be numbers" },
+      );
+    }
+
+    let user = users.find((u) => u.id === userId);
+    if (!user) {
+      user = { id: userId as string, role: authReq.user?.role || "admin" };
+      users.push(user);
+    }
+
+    const current: DashboardConfig = user.dashboard_config || {
+      layout: "grid",
+      widgets: [],
+    };
+
+    user.dashboard_config = reorderWidgets(current, fromIndex, toIndex);
+    res.json({ message: "Widgets reordered", userId, config: user.dashboard_config });
+  },
+);
+
+// PATCH /api/admin/dashboard/widgets/:widgetId/visibility — toggle visibility
+router.patch(
+  "/dashboard/widgets/:widgetId/visibility",
+  requireAdmin,
+  logAdminAction("TOGGLE_WIDGET_VISIBILITY"),
+  (req: Request, res: Response) => {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.id;
+    const { widgetId } = req.params;
+
+    let user = users.find((u) => u.id === userId);
+    if (!user) {
+      user = { id: userId as string, role: authReq.user?.role || "admin" };
+      users.push(user);
+    }
+
+    const current: DashboardConfig = user.dashboard_config || {
+      layout: "grid",
+      widgets: [],
+    };
+
+    user.dashboard_config = toggleWidgetVisibility(current, widgetId);
+    res.json({ message: "Widget visibility toggled", userId, config: user.dashboard_config });
+  },
+);
+
+// PATCH /api/admin/dashboard/widgets/:widgetId/refresh-rate — set refresh rate
+router.patch(
+  "/dashboard/widgets/:widgetId/refresh-rate",
+  requireAdmin,
+  logAdminAction("SET_WIDGET_REFRESH_RATE"),
+  (req: Request, res: Response) => {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.id;
+    const { widgetId } = req.params;
+    const { refreshRateSecs } = req.body;
+
+    if (typeof refreshRateSecs !== "number") {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "refreshRateSecs must be a number",
+        { message: "refreshRateSecs must be a number" },
+      );
+    }
+
+    let user = users.find((u) => u.id === userId);
+    if (!user) {
+      user = { id: userId as string, role: authReq.user?.role || "admin" };
+      users.push(user);
+    }
+
+    const current: DashboardConfig = user.dashboard_config || {
+      layout: "grid",
+      widgets: [],
+    };
+
+    user.dashboard_config = setWidgetRefreshRate(current, widgetId, refreshRateSecs);
+    res.json({ message: "Widget refresh rate updated", userId, config: user.dashboard_config });
   },
 );
 
@@ -3199,85 +3346,82 @@ router.get(
   },
 );
 
-import { reprocessingService } from "../services/reprocessingService";
-import { startReprocessingWorker, scheduleReprocessingPoller } from "../queue/reprocessingQueue";
-
-router.post(
-  "/reprocessing/enqueue",
+/**
+ * GET /api/admin/api-keys/scope-usage
+ * Returns usage statistics for API keys broken down by scope.
+ * Lists how many active keys carry each scope, along with the total
+ * active/expired/revoked key counts.
+ */
+router.get(
+  "/api-keys/scope-usage",
   requireAdmin,
-  logAdminAction("REPROCESSING_ENQUEUE"),
+  logAdminAction("GET_API_KEY_SCOPE_USAGE"),
   async (req: Request, res: Response) => {
     try {
-      const { transactionId, provider } = req.body;
-      if (!transactionId || !provider) {
-        throw createError(ERROR_CODES.MISSING_FIELD, "transactionId and provider are required");
+      // Fetch all API keys from the database
+      const result = await pool.query<{
+        permissions: number;
+        is_active: boolean;
+        expires_at: string | null;
+      }>(
+        `SELECT permissions, is_active, expires_at FROM api_keys`,
+      );
+
+      const rows = result.rows;
+      const now = new Date();
+
+      let totalActive = 0;
+      let totalExpired = 0;
+      let totalRevoked = 0;
+
+      // Scope name → count of active keys that carry that scope
+      const scopeCounts: Record<string, number> = {};
+
+      // Import scope definitions inline to avoid a circular-dependency risk
+      const { ApiKeyScope } = await import("../auth/apikeys");
+
+      for (const row of rows) {
+        const expired = row.expires_at ? new Date(row.expires_at) < now : false;
+
+        if (!row.is_active) {
+          totalRevoked++;
+          continue;
+        }
+        if (expired) {
+          totalExpired++;
+          continue;
+        }
+
+        totalActive++;
+
+        // Tally each scope bit present in this key's permissions bitmask
+        for (const [name, bit] of Object.entries(ApiKeyScope) as Array<[string, number]>) {
+          if ((row.permissions & bit) === bit) {
+            scopeCounts[name] = (scopeCounts[name] ?? 0) + 1;
+          }
+        }
       }
-      const job = await reprocessingService.enqueueFailedTransaction(transactionId, provider);
-      res.status(201).json({ success: true, data: job });
-    } catch (error) {
-      console.error("[Reprocessing] Enqueue failed:", error);
-      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to enqueue transaction for reprocessing");
-    }
-  },
-);
 
-router.get(
-  "/reprocessing/stats",
-  requireAdmin,
-  logAdminAction("GET_REPROCESSING_STATS"),
-  async (_req: Request, res: Response) => {
-    try {
-      const stats = await reprocessingService.getJobStats();
-      res.json({ success: true, data: stats });
-    } catch (error) {
-      console.error("[Reprocessing] Stats fetch failed:", error);
-      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch reprocessing stats");
-    }
-  },
-);
+      // Build an ordered list of scope usage entries
+      const scopeUsage = Object.entries(ApiKeyScope).map(([name, bit]) => ({
+        scope: name,
+        bit,
+        activeKeyCount: scopeCounts[name] ?? 0,
+      }));
 
-router.get(
-  "/reprocessing/jobs",
-  requireAdmin,
-  logAdminAction("GET_REPROCESSING_JOBS"),
-  async (req: Request, res: Response) => {
-    try {
-      const limit = parseInt(req.query.limit as string) || 50;
-      const jobs = await reprocessingService.getPendingJobs(limit);
-      res.json({ success: true, data: jobs });
+      res.json({
+        summary: {
+          total: rows.length,
+          active: totalActive,
+          expired: totalExpired,
+          revoked: totalRevoked,
+        },
+        scopeUsage,
+        generatedAt: now.toISOString(),
+      });
     } catch (error) {
-      console.error("[Reprocessing] List jobs failed:", error);
-      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch reprocessing jobs");
-    }
-  },
-);
-
-router.post(
-  "/reprocessing/:jobId/cancel",
-  requireAdmin,
-  logAdminAction("REPROCESSING_CANCEL"),
-  async (req: Request, res: Response) => {
-    try {
-      await reprocessingService.cancelJob(req.params.jobId);
-      res.json({ success: true, message: "Job cancelled" });
-    } catch (error) {
-      console.error("[Reprocessing] Cancel failed:", error);
-      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to cancel reprocessing job");
-    }
-  },
-);
-
-router.put(
-  "/reprocessing/policies/:provider",
-  requireAdmin,
-  logAdminAction("UPDATE_REPROCESSING_POLICY"),
-  async (req: Request, res: Response) => {
-    try {
-      const policy = await reprocessingService.updatePolicy(req.params.provider, req.body);
-      res.json({ success: true, data: policy });
-    } catch (error) {
-      console.error("[Reprocessing] Policy update failed:", error);
-      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to update reprocessing policy");
+      console.error("[Admin] Scope usage fetch failed:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch API key scope usage");
     }
   },
 );
