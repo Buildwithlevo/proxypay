@@ -35,6 +35,13 @@ import { getConfiguredPaymentAsset } from "../services/stellar/assetService";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { travelRuleService } from "../compliance/travelRule";
 import { createError } from "../middleware/errorHandler";
+import {
+  createCursor,
+  createPaginatedResponse,
+  decodeCursor,
+  PaginationError,
+} from "../utils/pagination";
+import { activityTrackingService } from "../services/activityTrackingService";
 
 const IDEMPOTENCY_TTL_HOURS = Number(
   process.env.IDEMPOTENCY_KEY_TTL_HOURS || 24,
@@ -183,6 +190,21 @@ export const getTransactionHistoryHandler = async (
     let total: number | undefined;
 
     if (before || after) {
+      // Validate incoming cursors up front (legacy `<ts>|<id>` format still accepted)
+      try {
+        if (before) decodeCursor(before as string);
+        if (after) decodeCursor(after as string);
+      } catch (error) {
+        if (error instanceof PaginationError) {
+          throw createError(
+            ERROR_CODES.INVALID_INPUT,
+            "Invalid pagination cursor",
+            { error: "Invalid pagination cursor" },
+          );
+        }
+        throw error;
+      }
+
       const rows = await transactionModel.list(
         limitNum + 1,
         offsetNum,
@@ -200,24 +222,20 @@ export const getTransactionHistoryHandler = async (
         rows.reverse();
       }
 
-      const hasMore = rows.length > limitNum;
-      transactions = rows.slice(0, limitNum);
+      const result = createPaginatedResponse({
+        rows,
+        limit: limitNum,
+        getSortValue: (tx: any) => tx.createdAt,
+        getId: (tx: any) => tx.id,
+      });
 
       return res.json({
-        data: transactions,
+        data: result.data,
         pagination: {
-          limit: limitNum,
-          before: transactions.length
-            ? Buffer.from(
-                `${transactions[0].createdAt.toISOString()}|${transactions[0].id}`,
-              ).toString("base64")
-            : null,
-          after: transactions.length
-            ? Buffer.from(
-                `${transactions[transactions.length - 1].createdAt.toISOString()}|${transactions[transactions.length - 1].id}`,
-              ).toString("base64")
-            : null,
-          hasMore,
+          limit: result.pagination.limit,
+          before: result.pagination.prevCursor,
+          after: result.pagination.nextCursor,
+          hasMore: result.pagination.hasMore,
         },
       });
     }
@@ -603,6 +621,23 @@ async function processTransactionRequest(
             });
             void monitorTransactionForAML(transaction);
             void applyTravelRule(transaction);
+
+            // Track transaction initiation for activity analytics (best-effort).
+            void activityTrackingService.trackActivity({
+              userId,
+              eventType:
+                type === "deposit"
+                  ? "transaction.deposit_initiated"
+                  : "transaction.withdraw_initiated",
+              aggregateId: transaction.id,
+              payload: {
+                transactionId: transaction.id,
+                amount: String(amount),
+                provider,
+              },
+              ipAddress: req.ip,
+              userAgent: req.get("user-agent"),
+            });
 
             const job = await addTransactionJob(
               {

@@ -72,6 +72,9 @@ import { privacyRoutes } from "./routes/privacy";
 import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
 import mtnCallbacksRouter from "./routes/mtnCallbacks";
+import airtelCallbacksRouter from "./routes/airtelCallbacks";
+import orangeCallbacksRouter from "./routes/orangeCallbacks";
+import analyticsRouter from "./routes/analytics";
 import sep31Router from "./stellar/sep31";
 import sep24Router from "./stellar/sep24";
 import sep38Router from "./stellar/sep38";
@@ -455,6 +458,8 @@ app.use("/api/disputes", disputeRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
 app.use("/api/mtn", mtnCallbacksRouter);
+app.use("/api/airtel", airtelCallbacksRouter);
+app.use("/api/orange", orangeCallbacksRouter);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/fees", feesRoutes);
 app.use("/api/users", userRoutes);
@@ -477,6 +482,7 @@ app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
 // #405 – Provider Health Dashboard
 app.use("/api/admin/providers/health", requireAuth, providerHealthRouter);
 app.use("/api/admin/kyc-upgrades", requireAuth, kycTierUpgradeRoutes);
+app.use("/api/admin/analytics", requireAuth, analyticsRouter);
 app.use("/api/admin/auth", createAdminSep10Router());
 // #402 – KYC Webhook Callbacks
 app.use("/api/kyc/webhooks", kycWebhookRouter);
