@@ -2,6 +2,15 @@
 -- Adds targeted expression indexes on common metadata fields,
 -- a full-text search index, and query performance helpers.
 
+-- 0. Helper: flatten all string leaves of a JSONB value into a single text string.
+--    Created BEFORE the generated column that references it — PostgreSQL
+--    resolves the function at parse time, so ordering matters.
+CREATE OR REPLACE FUNCTION jsonb_to_text(j jsonb)
+RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  SELECT string_agg(value, ' ')
+  FROM jsonb_each_text(j)
+$$;
+
 -- 1. Expression indexes for common metadata top-level keys
 --    (supplements the existing GIN index on the whole metadata column)
 
@@ -42,19 +51,6 @@ ALTER TABLE transactions
 
 CREATE INDEX IF NOT EXISTS idx_txn_metadata_fts
   ON transactions USING GIN (metadata_tsv);
-
--- Helper: flatten all string leaves of a JSONB value into a single text string.
-CREATE OR REPLACE FUNCTION jsonb_to_text(j jsonb)
-RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
-  SELECT string_agg(value, ' ')
-  FROM jsonb_each_text(j)
-$$;
-
--- Recreate generated column so the function is resolved (order matters in SQL)
--- NOTE: In a real migration runner this would be in two steps; for Postgres 12+
--- the generated column references the function by name at parse time so we need
--- the function first.  The ADD COLUMN above is a no-op if the column already
--- exists, so rerunning is safe.
 
 -- 3. Composite index: status + created_at + metadata GIN for range + filter queries
 CREATE INDEX IF NOT EXISTS idx_txn_status_meta
