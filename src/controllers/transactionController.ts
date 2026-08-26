@@ -41,6 +41,7 @@ import {
   decodeCursor,
   PaginationError,
 } from "../utils/pagination";
+import { activityTrackingService } from "../services/activityTrackingService";
 
 const IDEMPOTENCY_TTL_HOURS = Number(
   process.env.IDEMPOTENCY_KEY_TTL_HOURS || 24,
@@ -620,6 +621,23 @@ async function processTransactionRequest(
             });
             void monitorTransactionForAML(transaction);
             void applyTravelRule(transaction);
+
+            // Track transaction initiation for activity analytics (best-effort).
+            void activityTrackingService.trackActivity({
+              userId,
+              eventType:
+                type === "deposit"
+                  ? "transaction.deposit_initiated"
+                  : "transaction.withdraw_initiated",
+              aggregateId: transaction.id,
+              payload: {
+                transactionId: transaction.id,
+                amount: String(amount),
+                provider,
+              },
+              ipAddress: req.ip,
+              userAgent: req.get("user-agent"),
+            });
 
             const job = await addTransactionJob(
               {
