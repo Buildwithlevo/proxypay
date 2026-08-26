@@ -303,3 +303,22 @@ export const jobsTotal = new Counter({
   labelNames: ["queue", "job_name", "status"],
   registers: [register],
 });
+
+// ---------------------------------------------------------------------------
+// Provider Webhook Authenticity Metrics
+// ---------------------------------------------------------------------------
+
+export const providerWebhookVerificationTotal = new Counter({
+  name: "provider_webhook_verification_total",
+  help: "Total number of incoming provider webhook signature verification attempts",
+  labelNames: ["provider", "outcome", "reason"],
+  registers: [register],
+});
+
+export const providerWebhookVerificationDurationSeconds = new Histogram({
+  name: "provider_webhook_verification_duration_seconds",
+  help: "Duration of provider webhook signature verification in seconds",
+  labelNames: ["provider", "outcome"],
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+  registers: [register],
+});
