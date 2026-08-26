@@ -170,6 +170,12 @@ export const dbReplicaReadEnabled = new Gauge({
   registers: [register],
 });
 
+export const dbReplicaFailoversTotal = new Counter({
+  name: "db_replica_failovers_total",
+  help: "Total number of read query failovers from replica to primary",
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics
