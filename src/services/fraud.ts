@@ -4,6 +4,7 @@ import { TransactionModel } from '../models/transaction';
 import { UserModel } from '../models/users';
 import { redisClient } from '../config/redis';
 import logger from '../utils/logger';
+import { fraudLoggingService } from './fraudLoggingService';
 
 /**
  * Enhanced Fraud Detection Service
@@ -112,6 +113,9 @@ export interface FraudResult {
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
   heuristicsTriggered: string[];
   recommendedAction: 'allow' | 'review' | 'block';
+  heuristicDetails?: Record<string, unknown>;
+  durationMs?: number;
+  transactionHistoryCount?: number;
 }
 
 function getDistanceKm(
@@ -627,6 +631,9 @@ export class FraudService {
       riskLevel,
       heuristicsTriggered,
       recommendedAction,
+      heuristicDetails,
+      durationMs,
+      transactionHistoryCount: userTransactions.length,
     };
   }
 
@@ -690,6 +697,23 @@ export class FraudService {
     const result = await this.detectFraud(transactionInput);
 
     this.logFraudAlert(result, transactionInput);
+
+    // Log full evaluation context to database
+    try {
+      const evaluationLogId = await fraudLoggingService.logEvaluation(
+        result,
+        transactionInput,
+        result.heuristicDetails || {},
+        result.durationMs || 0,
+        result.transactionHistoryCount || 0,
+      );
+
+      if (result.isFraud) {
+        await fraudLoggingService.createAlert(evaluationLogId, result, transactionInput);
+      }
+    } catch (error) {
+      logger.error({ err: error, transactionId: transactionInput.id }, 'Failed to log fraud evaluation');
+    }
 
     if (result.isFraud) {
       this.addToReviewQueue(transactionInput);
