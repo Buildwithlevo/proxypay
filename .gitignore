@@ -23,6 +23,10 @@ coverage/
 .nyc_output/
 stryker-tmp/
 
+# Test snapshots
+**/__snapshots__/
+*.snap
+
 # Logs
 *.log
 pact.log
@@ -36,8 +40,6 @@ pact.log
 # Kiro
 .kiro/
 
-
-
 # Load test output
 tests/load/results/*.json
 benchmarks/results/*.json
@@ -47,4 +49,35 @@ benchmarks/results/*.json
 *.temp
 .cache/
 
+# Secrets and sensitive config
 secret.yaml
+secrets.yaml
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editor and IDE artifacts
+*.swp
+*.swo
+*~
+.idea/
+*.iml
+
+# Debug output
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Playwright test results
+playwright-report/
+test-results/
+
+# Stryker mutation testing output
+reports/mutation/
+
+# TypeScript incremental compilation
+*.tsbuildinfo
+
+# Misc generated files
+generated/
