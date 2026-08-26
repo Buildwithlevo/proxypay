@@ -337,3 +337,41 @@ export const transactionClassifierTrainingSamples = new Gauge({
   help: "Number of labelled training samples stored for the transaction classifier",
   registers: [register],
 });
+
+// Webhook Retry Metrics
+export const webhookRetryAttemptsTotal = new Counter({
+  name: "webhook_retry_attempts_total",
+  help: "Total number of webhook retry attempts",
+  labelNames: ["merchant_id", "status", "attempt"],
+  registers: [register],
+});
+
+export const webhookRetryDelaySeconds = new Histogram({
+  name: "webhook_retry_delay_seconds",
+  help: "Delay between webhook retry attempts in seconds",
+  labelNames: ["merchant_id"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
+  registers: [register],
+});
+
+export const webhookRetryPolicyUpdatesTotal = new Counter({
+  name: "webhook_retry_policy_updates_total",
+  help: "Total number of webhook retry policy updates",
+  labelNames: ["action"],
+  registers: [register],
+});
+
+// Batch Processing Metrics
+export const batchProcessingParallelItemsTotal = new Counter({
+  name: "batch_processing_parallel_items_total",
+  help: "Total number of items processed in parallel batches",
+  labelNames: ["provider", "status"],
+  registers: [register],
+});
+
+export const batchProcessingCircuitBreakerTripsTotal = new Counter({
+  name: "batch_processing_circuit_breaker_trips_total",
+  help: "Total number of circuit breaker trips in batch processing",
+  labelNames: ["provider"],
+  registers: [register],
+});
