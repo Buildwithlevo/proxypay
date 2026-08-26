@@ -337,3 +337,69 @@ export const transactionClassifierTrainingSamples = new Gauge({
   help: "Number of labelled training samples stored for the transaction classifier",
   registers: [register],
 });
+
+// ──── Transaction Processing Rate Metrics (for HPA scaling) ────
+
+/**
+ * Transaction processing rate (transactions per second).
+ * This metric is used for HPA scaling decisions based on application-level metrics.
+ */
+export const transactionProcessingRate = new Gauge({
+  name: "transaction_processing_rate",
+  help: "Current transaction processing rate (transactions per second)",
+  labelNames: ["provider", "type"],
+  registers: [register],
+});
+
+/**
+ * Transaction queue depth (pending transactions waiting to be processed).
+ * This is the primary metric for worker autoscaling.
+ */
+export const transactionQueueDepth = new Gauge({
+  name: "transaction_queue_depth",
+  help: "Number of transactions waiting to be processed",
+  labelNames: ["queue", "status"],
+  registers: [register],
+});
+
+/**
+ * Provider-specific transaction rate.
+ * Allows scaling based on individual provider load.
+ */
+export const providerTransactionRate = new Gauge({
+  name: "provider_transaction_rate",
+  help: "Transaction rate per provider (transactions per second)",
+  labelNames: ["provider"],
+  registers: [register],
+});
+
+/**
+ * Provider queue depth.
+ * Allows scaling based on individual provider queue depth.
+ */
+export const providerQueueDepth = new Gauge({
+  name: "provider_queue_depth",
+  help: "Queue depth per provider",
+  labelNames: ["provider"],
+  registers: [register],
+});
+
+/**
+ * Transaction processing latency (P95).
+ * Used for latency-based scaling decisions.
+ */
+export const transactionProcessingLatencyP95 = new Gauge({
+  name: "transaction_processing_latency_p95_seconds",
+  help: "P95 transaction processing latency in seconds",
+  registers: [register],
+});
+
+/**
+ * Worker utilization ratio.
+ * Ratio of active workers to total workers. Used for scaling decisions.
+ */
+export const workerUtilizationRatio = new Gauge({
+  name: "worker_utilization_ratio",
+  help: "Ratio of active workers to total workers (0-1)",
+  registers: [register],
+});
