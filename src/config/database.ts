@@ -1,11 +1,21 @@
 import { Pool, QueryConfig, QueryResult, QueryResultRow, PoolClient } from "pg";
 import { auditService } from "../services/auditlogService";
 import { isReadOnlyQuery } from "../utils/readOnlyDetector";
-import { dbReplicaLagSeconds, dbReplicaReadEnabled } from "../utils/metrics";
+import {
+  dbReplicaLagSeconds,
+  dbReplicaReadEnabled,
+  dbDrMode,
+  dbReplicationStatus,
+  dbReplicaCount,
+} from "../utils/metrics";
 import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
 
 const DR_DATABASE_URL = process.env.DR_DATABASE_URL;
 const isDRMode = (): boolean => !!DR_DATABASE_URL;
+
+// Expose DR mode as a Prometheus gauge so dashboards/alerting can react to
+// failover without parsing logs. 1 = failover active, 0 = standby/normal.
+dbDrMode.set(isDRMode() ? 1 : 0);
 
 const productionSsl =
   process.env.NODE_ENV === "production" ? { rejectUnauthorized: true } : undefined;
@@ -538,6 +548,8 @@ export async function getPoolStats(): Promise<{
   replicas: Array<{
     url: string;
     healthy: boolean;
+    enabled: boolean;
+    lagSeconds: number | null;
   }>;
 }> {
   const replicaStats = await checkReplicaHealth();
@@ -551,5 +563,44 @@ export async function getPoolStats(): Promise<{
         : "Primary database - all critical writes",
     },
     replicas: replicaStats,
+  };
+}
+
+/**
+ * Aggregated replication status for health endpoints and dashboards.
+ * Reports DR mode, per-replica health/lag, and an overall status.
+ * Replication lag alone never takes the service down (reads fall back to the
+ * primary), so this is informational for /ready rather than gating readiness.
+ */
+export async function getReplicationStatus(): Promise<{
+  drMode: "active" | "standby";
+  status: "ok" | "degraded";
+  replicas: Array<{
+    url: string;
+    healthy: boolean;
+    enabled: boolean;
+    lagSeconds: number | null;
+  }>;
+  lagThresholdSeconds: number;
+}> {
+  const replicas = await checkReplicaHealth();
+  const degraded = replicas.some(
+    (r) =>
+      !r.healthy ||
+      !r.enabled ||
+      (r.lagSeconds !== null && r.lagSeconds > REPLICA_SYNC_LAG_THRESHOLD_SECONDS),
+  );
+
+  const status = degraded ? "degraded" : "ok";
+  const healthyEnabled = replicas.filter((r) => r.healthy && r.enabled).length;
+
+  dbReplicationStatus.set(status === "ok" ? 1 : status === "degraded" ? 0 : -1);
+  dbReplicaCount.set(healthyEnabled);
+
+  return {
+    drMode: isDRMode() ? "active" : "standby",
+    status,
+    replicas,
+    lagThresholdSeconds: REPLICA_SYNC_LAG_THRESHOLD_SECONDS,
   };
 }

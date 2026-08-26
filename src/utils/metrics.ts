@@ -170,6 +170,24 @@ export const dbReplicaReadEnabled = new Gauge({
   registers: [register],
 });
 
+export const dbDrMode = new Gauge({
+  name: "db_dr_mode",
+  help: "Disaster recovery mode (1 = failover active, writes redirected to promoted replica; 0 = standby/normal)",
+  registers: [register],
+});
+
+export const dbReplicationStatus = new Gauge({
+  name: "db_replication_status",
+  help: "Overall replication health (1 = ok, 0 = degraded, -1 = unknown)",
+  registers: [register],
+});
+
+export const dbReplicaCount = new Gauge({
+  name: "db_replica_count",
+  help: "Number of configured read replicas that are healthy and enabled",
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics

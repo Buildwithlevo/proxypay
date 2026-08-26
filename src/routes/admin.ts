@@ -22,7 +22,7 @@ import {
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { getQueueStats } from "../queue/transactionQueue";
 import { redisClient } from "../config/redis";
-import { checkReplicaHealth, pool } from "../config/database";
+import { checkReplicaHealth, getPoolStats, pool } from "../config/database";
 import { UserModel } from "../models/users";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { StellarService } from "../services/stellar/stellarService";
@@ -2130,6 +2130,28 @@ router.get(
           status: "error",
           message: "Failed to retrieve health data",
           timestamp: new Date().toISOString(),
+        },
+      );
+    }
+  },
+);
+
+// GET /api/admin/database/replication — cross-region replication status
+router.get(
+  "/database/replication",
+  requireAdmin,
+  logAdminAction("GET_DATABASE_REPLICATION"),
+  async (_req: Request, res: Response) => {
+    try {
+      const stats = await getPoolStats();
+      res.json({ success: true, ...stats });
+    } catch (err) {
+      console.error("Error fetching replication status:", err);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch replication status",
+        {
+          message: err instanceof Error ? err.message : "Unknown error",
         },
       );
     }
