@@ -22,6 +22,7 @@ import {
 import { getLockoutStatus, recordFailedAttempt } from "../auth/lockout";
 import { verifyTOTPToken, verifyBackupCode, is2FAEnabled } from "../auth/2fa";
 import { evaluateAdminLoginAnomaly } from "../services/loginAnomaly";
+import { activityTrackingService } from "../services/activityTrackingService";
 import { checkDeviceFingerprint } from "../middleware/fingerprint";
 import { validateRequest } from "../middleware/validation";
 import { hashPassword } from "../utils/password";
@@ -235,6 +236,15 @@ authRoutes.post(
       const token = generateToken(payload);
       const refreshToken = await generateRefreshToken(user.id);
       const permissions = await getUserPermissions(user.id);
+
+      // Track successful login for activity analytics (best-effort, non-blocking).
+      void activityTrackingService.trackActivity({
+        userId: user.id,
+        eventType: "user.login",
+        ipAddress: req.ip,
+        userAgent: req.get("user-agent"),
+        metadata: { method: "phone_password" },
+      });
 
       res.json({
         message: "Login successful",

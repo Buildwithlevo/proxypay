@@ -34,6 +34,7 @@ import {
 } from "../models/dispute";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import logger from "../utils/logger";
+import { notificationRouter } from "./notificationRouter";
 
 // ---------------------------------------------------------------------------
 // Allowed status transitions
@@ -74,9 +75,6 @@ interface NotificationPayload {
 }
 
 async function sendNotification(payload: NotificationPayload): Promise<void> {
-  // Import notification router service for proper multi-channel delivery
-  const { notificationRouter } = await import("./notificationRouter.js");
-  
   try {
     // Use notification router to send via email, SMS, webhook as configured
     await notificationRouter.sendDisputeNotification({
@@ -87,7 +85,7 @@ async function sendNotification(payload: NotificationPayload): Promise<void> {
       message: payload.message,
       metadata: payload.metadata,
     });
-    
+
     logger.info(
       {
         event: payload.event,
@@ -565,5 +563,87 @@ export class DisputeService {
       summary: rows,
       totals,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // #413 Evidence Organization Methods
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Update the category of a specific evidence item.
+   */
+  async updateEvidenceCategory(
+    disputeId: string,
+    evidenceId: string,
+    category: string,
+  ): Promise<DisputeEvidence | null> {
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+    return this.disputeModel.updateEvidenceCategory(evidenceId, disputeId, category);
+  }
+
+  /**
+   * Reorder evidence items (drag-and-drop support).
+   * @param disputeId  UUID of the dispute.
+   * @param order      Array of { id, position } objects.
+   */
+  async reorderEvidence(
+    disputeId: string,
+    order: Array<{ id: string; position: number }>,
+  ): Promise<number> {
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+    return this.disputeModel.reorderEvidence(disputeId, order);
+  }
+
+  /**
+   * Search evidence by keyword and/or category.
+   */
+  async searchEvidence(
+    disputeId: string,
+    query: string,
+    category?: string,
+  ): Promise<DisputeEvidence[]> {
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+    return this.disputeModel.searchEvidence(disputeId, query, category);
+  }
+
+  /**
+   * Get the timeline of events for a dispute (status changes, evidence adds, notes).
+   */
+  async getTimeline(disputeId: string) {
+    const dispute = await this.disputeModel.findByIdWithDetails(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+    return dispute.timeline;
+  }
+
+  /**
+   * Get evidence grouped by category.
+   */
+  async getEvidenceByCategory(
+    disputeId: string,
+  ): Promise<Record<string, DisputeEvidence[]>> {
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+    const allEvidence = await this.disputeModel.getEvidence(disputeId);
+
+    const grouped: Record<string, DisputeEvidence[]> = {};
+    for (const ev of allEvidence) {
+      const cat = (ev as any).category ?? 'other';
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(ev);
+    }
+    return grouped;
   }
 }

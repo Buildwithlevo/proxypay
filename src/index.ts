@@ -48,6 +48,7 @@ import {
   createRedisStore,
   SESSION_TTL_SECONDS,
 } from "./config/redis";
+import { rateLimitMiddleware } from "./middleware/rateLimitRedis";
 import { createOAuthRouter } from "./auth/oauth";
 import { pool } from "./config/database";
 import {
@@ -65,11 +66,15 @@ import { i18nMiddleware } from "./utils/i18n";
 import { metricsMiddleware } from "./middleware/metrics";
 import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
 import { sessionAnomalyLogger } from "./services/logger";
-import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
+import { HealthCheckResponse, ReadinessCheckResponse, ProviderHealthSummary } from "./types/api";
+import { checkMobileMoneyHealth, ProviderName } from "./services/mobilemoney/providers/healthCheck";
 import { privacyRoutes } from "./routes/privacy";
 import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
 import mtnCallbacksRouter from "./routes/mtnCallbacks";
+import airtelCallbacksRouter from "./routes/airtelCallbacks";
+import orangeCallbacksRouter from "./routes/orangeCallbacks";
+import analyticsRouter from "./routes/analytics";
 import sep31Router from "./stellar/sep31";
 import sep24Router from "./stellar/sep24";
 import sep38Router from "./stellar/sep38";
@@ -89,6 +94,10 @@ import settingsRoutes from "./routes/settings";
 import { statementsRoutes } from "./routes/statements";
 import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
+import providerHealthRouter from "./routes/providerHealthRoutes";
+import kycWebhookRouter from "./routes/kycWebhookRoutes";
+import twoFactorRouter from "./routes/twoFactorRoutes";
+import transactionMetadataRouter from "./routes/transactionMetadataRoutes";
 import { transactionStreamRoutes } from "./routes/stream";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
@@ -124,9 +133,9 @@ if (process.env.SENTRY_DSN) {
   Sentry.setupExpressErrorHandler(app);
 }
 
-// import rateLimitMiddleware from "./middleware/rateLimit"; // TODO: Commented out because the module has no default export and I don't know each middleware was .
-
 app.use(sentryBreadcrumbMiddleware);
+
+app.use(rateLimitMiddleware);
 
 app.use(metricsMiddleware);
 app.use(helmet());
@@ -225,11 +234,59 @@ app.use(
 );
 app.use(sessionAnomalyLogger);
 
-app.get("/health", (_req: Request, res: Response) => {
+/**
+ * Get aggregated provider health summary
+ */
+async function getProviderHealthSummary(): Promise<ProviderHealthSummary> {
+  try {
+    const healthResult = await checkMobileMoneyHealth();
+    const providers = healthResult.providers;
+    const providerNames = Object.keys(providers) as ProviderName[];
+    
+    const providerStatus: Record<string, "up" | "down" | "unknown"> = {};
+    let healthyCount = 0;
+    
+    for (const name of providerNames) {
+      const status = providers[name]?.status ?? "unknown";
+      providerStatus[name] = status;
+      if (status === "up") healthyCount++;
+    }
+    
+    const totalCount = providerNames.length;
+    let overall: "healthy" | "degraded" | "down";
+    
+    if (healthyCount === totalCount) {
+      overall = "healthy";
+    } else if (healthyCount > 0) {
+      overall = "degraded";
+    } else {
+      overall = "down";
+    }
+    
+    return {
+      overall,
+      providers: providerStatus,
+      healthyCount,
+      totalCount,
+    };
+  } catch (err) {
+    console.error("Provider health check failed", err);
+    return {
+      overall: "unknown",
+      providers: {},
+      healthyCount: 0,
+      totalCount: 0,
+    };
+  }
+}
+
+app.get("/health", async (_req: Request, res: Response) => {
+  const providerHealth = await getProviderHealthSummary();
   const body: HealthCheckResponse = {
     status: "ok",
     timestamp: new Date().toISOString(),
     gitHash: process.env.BUILD_HASH,
+    providers: providerHealth,
   };
   res.json(body);
 });
@@ -318,6 +375,21 @@ app.get("/health/lb", async (req: Request, res: Response) => {
     healthy = false;
   }
 
+  // Check provider health
+  try {
+    const providerHealth = await getProviderHealthSummary();
+    checks.providers = providerHealth.overall;
+    if (providerHealth.overall === "down") {
+      healthy = false;
+    } else if (providerHealth.overall === "degraded") {
+      // Don't mark as unhealthy, but track it
+      checks.providersDetail = JSON.stringify(providerHealth.providers);
+    }
+  } catch (err) {
+    console.error("Provider health check failed", err);
+    checks.providers = "error";
+  }
+
   const memUsage = process.memoryUsage();
   if (memUsage.heapUsed > 1024 * 1024 * 1024) {
     // 1GB limit
@@ -386,6 +458,8 @@ app.use("/api/disputes", disputeRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
 app.use("/api/mtn", mtnCallbacksRouter);
+app.use("/api/airtel", airtelCallbacksRouter);
+app.use("/api/orange", orangeCallbacksRouter);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/fees", feesRoutes);
 app.use("/api/users", userRoutes);
@@ -405,8 +479,17 @@ app.use("/api/gdpr", privacyRoutes);
 app.use("/api/developer", developerDashboardRoutes);
 app.use("/api/admin", requireAuth, adminRoutes);
 app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
+// #405 – Provider Health Dashboard
+app.use("/api/admin/providers/health", requireAuth, providerHealthRouter);
 app.use("/api/admin/kyc-upgrades", requireAuth, kycTierUpgradeRoutes);
+app.use("/api/admin/analytics", requireAuth, analyticsRouter);
 app.use("/api/admin/auth", createAdminSep10Router());
+// #402 – KYC Webhook Callbacks
+app.use("/api/kyc/webhooks", kycWebhookRouter);
+// #403 – Transaction Metadata Search
+app.use("/api/transactions/metadata", transactionMetadataRouter);
+// #404 – 2FA Multi-method
+app.use("/api/auth/2fa", twoFactorRouter);
 app.use("/sep10", createSep10Router());
 app.use("/sep31", sep31Router);
 app.use("/sep24", sep24Router);

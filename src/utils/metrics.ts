@@ -303,3 +303,37 @@ export const jobsTotal = new Counter({
   labelNames: ["queue", "job_name", "status"],
   registers: [register],
 });
+
+// Transaction Type Classifier Metrics (ML auto-categorisation)
+export const transactionClassificationsTotal = new Counter({
+  name: "transaction_classifications_total",
+  help: "Total number of transactions classified by the ML model",
+  labelNames: ["category"],
+  registers: [register],
+});
+
+export const transactionClassificationConfidence = new Histogram({
+  name: "transaction_classification_confidence",
+  help: "Confidence scores of ML transaction classifications",
+  buckets: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99],
+  registers: [register],
+});
+
+export const transactionClassifierAccuracy = new Gauge({
+  name: "transaction_classifier_accuracy",
+  help: "Accuracy of the transaction type classifier evaluated on human-labelled samples (0–1)",
+  registers: [register],
+});
+
+export const transactionClassifierFeedbackTotal = new Counter({
+  name: "transaction_classifier_feedback_total",
+  help: "Total number of human feedback corrections submitted for the classifier",
+  labelNames: ["corrected_category"],
+  registers: [register],
+});
+
+export const transactionClassifierTrainingSamples = new Gauge({
+  name: "transaction_classifier_training_samples",
+  help: "Number of labelled training samples stored for the transaction classifier",
+  registers: [register],
+});
