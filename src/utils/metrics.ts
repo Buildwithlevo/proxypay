@@ -337,3 +337,55 @@ export const transactionClassifierTrainingSamples = new Gauge({
   help: "Number of labelled training samples stored for the transaction classifier",
   registers: [register],
 });
+
+// Trustline Monitoring Metrics
+export const trustlineChecksTotal = new Counter({
+  name: "trustline_checks_total",
+  help: "Total number of trustline checks performed",
+  labelNames: ["asset_code", "has_trustline"],
+  registers: [register],
+});
+
+export const trustlineRestorationsTotal = new Counter({
+  name: "trustline_restorations_total",
+  help: "Total number of trustline restoration attempts",
+  labelNames: ["asset_code", "status"],
+  registers: [register],
+});
+
+export const trustlineAlertsTotal = new Counter({
+  name: "trustline_alerts_total",
+  help: "Total number of missing trustline alerts sent",
+  labelNames: ["asset_code"],
+  registers: [register],
+});
+
+// Adaptive Rate Limiting Metrics
+export const adaptiveRateLimitAdjustmentsTotal = new Counter({
+  name: "adaptive_rate_limit_adjustments_total",
+  help: "Total number of adaptive rate limit adjustments",
+  labelNames: ["provider", "direction"],
+  registers: [register],
+});
+
+export const adaptiveRateLimitCurrentCapacity = new Gauge({
+  name: "adaptive_rate_limit_current_capacity",
+  help: "Current token bucket capacity for each provider",
+  labelNames: ["provider"],
+  registers: [register],
+});
+
+export const rateLimitViolationsTotal = new Counter({
+  name: "rate_limit_violations_total",
+  help: "Total number of rate limit violations detected from provider responses",
+  labelNames: ["provider", "status_code"],
+  registers: [register],
+});
+
+// Payment Link Expiration Metrics
+export const paymentLinkExpirationNotificationsTotal = new Counter({
+  name: "payment_link_expiration_notifications_total",
+  help: "Total number of payment link expiration notifications sent",
+  labelNames: ["notification_type"],
+  registers: [register],
+});

@@ -35,6 +35,8 @@ import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { runTravelRuleAuditReportJob } from "./travelRuleAuditReportJob";
 import { runRedisKeyExpirationMonitorJob } from "./redisKeyExpirationJob";
+import { runTrustlineMonitorJob } from "./trustlineMonitorJob";
+import { runPaymentLinkExpirationJob } from "./paymentLinkExpirationJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
 interface JobConfig {
@@ -176,6 +178,18 @@ const JOBS: JobConfig[] = [
     // Every 10 minutes - monitors Redis memory/eviction and cleans up orphaned keys
     schedule: process.env.REDIS_EXPIRY_MONITOR_CRON || "*/10 * * * *",
     handler: runRedisKeyExpirationMonitorJob,
+  },
+  {
+    name: "trustline-monitor",
+    // Every 10 minutes - verifies hot wallet trustlines and restores missing ones
+    schedule: process.env.TRUSTLINE_MONITOR_CRON || "*/10 * * * *",
+    handler: runTrustlineMonitorJob,
+  },
+  {
+    name: "payment-link-expiration",
+    // Every hour - checks for expiring/expired payment links and sends notifications
+    schedule: process.env.PAYMENT_LINK_EXPIRATION_CRON || "0 * * * *",
+    handler: runPaymentLinkExpirationJob,
   },
 ];
 
