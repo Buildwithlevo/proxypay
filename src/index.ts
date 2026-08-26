@@ -49,6 +49,7 @@ import {
   SESSION_TTL_SECONDS,
 } from "./config/redis";
 import { rateLimitMiddleware } from "./middleware/rateLimitRedis";
+import rateLimitDefaultMiddleware from "./middleware/rateLimit";
 import { createOAuthRouter } from "./auth/oauth";
 import { pool } from "./config/database";
 import {
@@ -182,7 +183,7 @@ app.use(
     extended: true,
   }),
 );
-// app.use(rateLimitMiddleware);
+app.use(rateLimitDefaultMiddleware);
 app.use(responseTime);
 app.use(requestId);
 app.use(readReplicaRoutingMiddleware);
