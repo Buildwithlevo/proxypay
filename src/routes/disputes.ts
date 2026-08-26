@@ -77,6 +77,11 @@ import { requireAuth } from "../middleware/auth";
 import { requirePermission } from "../middleware/rbac";
 import { createError } from "../middleware/errorHandler";
 import { ERROR_CODES } from "../constants/errorCodes";
+import {
+  gateUpload,
+  linkStoredKey,
+  UploadGateResult,
+} from "../services/fileSecurityService";
 
 const VALID_STATUSES: DisputeStatus[] = [
   "open",
@@ -659,6 +664,33 @@ disputeRoutes.post(
       });
     }
 
+    // Security scan: antivirus + magic-byte type validation + integrity hash.
+    // The file must pass before anything is written to storage.
+    const security = await gateUpload(file, {
+      userId: req.user?.id || null,
+    });
+    if (security.outcome === "infected") {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "Upload rejected: file failed the security scan",
+        { error: security.reason },
+      );
+    }
+    if (security.outcome === "quarantined") {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "Upload quarantined: scan engine unavailable, please retry later",
+        { error: security.reason },
+      );
+    }
+    if (security.outcome === "error" || !security.record) {
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Upload security scan failed",
+        { error: security.reason },
+      );
+    }
+
     try {
       // Upload to S3
       const uploadResult = await uploadDisputeEvidenceToS3({
@@ -671,6 +703,18 @@ disputeRoutes.post(
         throw createError(ERROR_CODES.INTERNAL_ERROR, uploadResult.error, {
           error: uploadResult.error,
         });
+      }
+
+      // Attach the stored key to the security record for integrity audits.
+      if (uploadResult.success && uploadResult.key) {
+        await linkStoredKey(security.record.id, uploadResult.key).catch(
+          (err: unknown) => {
+            console.error(
+              "Failed to link security record to S3 key:",
+              err,
+            );
+          },
+        );
       }
 
       // Save evidence record
@@ -736,6 +780,37 @@ disputeRoutes.post(
       }
     }
 
+    // Security scan every file before anything is written to storage. If any
+    // file fails, the whole batch is rejected.
+    const securityResults: UploadGateResult[] = [];
+    for (const file of files) {
+      const security = await gateUpload(file, {
+        userId: req.user?.id || null,
+      });
+      if (security.outcome === "infected") {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          `File "${file.originalname}" rejected: failed the security scan`,
+          { error: security.reason },
+        );
+      }
+      if (security.outcome === "quarantined") {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          `File "${file.originalname}" quarantined: scan engine unavailable, please retry later`,
+          { error: security.reason },
+        );
+      }
+      if (security.outcome === "error" || !security.record) {
+        throw createError(
+          ERROR_CODES.INTERNAL_ERROR,
+          "Upload security scan failed",
+          { error: security.reason },
+        );
+      }
+      securityResults.push(security);
+    }
+
     try {
       // Upload all files to S3
       const uploadResults = await uploadMultipleDisputeEvidenceToS3(
@@ -764,6 +839,19 @@ disputeRoutes.post(
         const description = Array.isArray(descriptions)
           ? descriptions[i]
           : descriptions;
+
+        // Attach the stored key to the security record for integrity audits.
+        if (uploadResult.success && uploadResult.key) {
+          await linkStoredKey(
+            securityResults[i].record!.id,
+            uploadResult.key,
+          ).catch((err: unknown) => {
+            console.error(
+              "Failed to link security record to S3 key:",
+              err,
+            );
+          });
+        }
 
         const evidence = await disputeService.addEvidence(
           disputeId,
