@@ -5,6 +5,11 @@ import {
   WebhookDeliveryLog,
 } from "../models/merchantWebhook";
 import { SAMPLE_WEBHOOK_PAYLOAD } from "../routes/webhooks";
+import {
+  checkWebhookRateLimit,
+  recordWebhookFailure,
+  recordWebhookSuccess,
+} from "./webhookRateLimiter";
 
 const model = new MerchantWebhookModel();
 
@@ -98,12 +103,25 @@ export class MerchantWebhookService {
     const webhook = await model.findById(webhookId, userId);
     if (!webhook) throw new Error("Webhook not found");
 
+    const rateLimitResult = await checkWebhookRateLimit(userId);
+    if (!rateLimitResult.allowed) {
+      throw new Error(
+        `Rate limit exceeded. Retry after ${rateLimitResult.retryAfterSecs ?? 1} second(s).`,
+      );
+    }
+
     const payload = {
       ...SAMPLE_WEBHOOK_PAYLOAD,
       timestamp: new Date().toISOString(),
     };
 
     const result = await deliver(webhook.url, webhook.secret, payload, this.fetchImpl);
+
+    if (result.status === "delivered") {
+      await recordWebhookSuccess(userId);
+    } else {
+      await recordWebhookFailure(userId);
+    }
 
     const log = await model.insertDeliveryLog({
       webhookId: webhook.id,
@@ -129,12 +147,28 @@ export class MerchantWebhookService {
     eventType: string,
     payload: Record<string, unknown>,
   ): Promise<void> {
+    const rateLimitResult = await checkWebhookRateLimit(userId);
+    if (!rateLimitResult.allowed) {
+      console.warn(
+        `[MerchantWebhookService] Rate limit exceeded for merchant ${userId}. ` +
+          `Retry after ${rateLimitResult.retryAfterSecs ?? 1}s. isAdaptive=${rateLimitResult.isAdaptive}`,
+      );
+      return;
+    }
+
     const webhooks = await model.findByUserId(userId);
     const active = webhooks.filter((w) => w.isActive && w.events.includes(eventType));
 
     await Promise.allSettled(
       active.map(async (webhook) => {
         const result = await deliver(webhook.url, webhook.secret, payload, this.fetchImpl);
+
+        if (result.status === "delivered") {
+          await recordWebhookSuccess(userId);
+        } else {
+          await recordWebhookFailure(userId);
+        }
+
         await model.insertDeliveryLog({
           webhookId: webhook.id,
           eventType,

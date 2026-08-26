@@ -3,6 +3,7 @@ import { Transaction, TransactionStatus } from '../models/transaction';
 import { TransactionModel } from '../models/transaction';
 import { UserModel } from '../models/users';
 import { redisClient } from '../config/redis';
+import logger from '../utils/logger';
 
 /**
  * Enhanced Fraud Detection Service
@@ -155,6 +156,7 @@ export class FraudService {
       if (cached && typeof cached === 'string') {
         const numbers = JSON.parse(cached) as string[];
         this.highRiskNumbers = new Set(numbers);
+        logger.info({ count: numbers.length }, 'Loaded high-risk phone numbers from cache');
       } else {
         // In production, load from database or external fraud intelligence
         const sampleNumbers = [
@@ -162,9 +164,10 @@ export class FraudService {
         ];
         this.highRiskNumbers = new Set(sampleNumbers);
         await redisClient.setex('fraud:high_risk_numbers', 3600, JSON.stringify(sampleNumbers));
+        logger.warn({ count: sampleNumbers.length }, 'Using default high-risk phone numbers; configure production fraud intelligence feed');
       }
     } catch (error) {
-      console.error('Failed to load high risk numbers:', error);
+      logger.error({ err: error }, 'Failed to load high risk numbers');
     }
   }
 
@@ -172,7 +175,7 @@ export class FraudService {
     try {
       return await this.transactionModel.findByUserId(userId);
     } catch (error) {
-      console.error('Failed to get user transactions:', error);
+      logger.error({ err: error, userId }, 'Failed to get user transactions');
       return [];
     }
   }
@@ -215,11 +218,12 @@ export class FraudService {
         // Add new device and set expiration
         await redisClient.sadd(key, deviceFingerprint);
         await redisClient.expire(key, this.config.deviceFingerprintWindowMs / 1000);
+        logger.info({ userId, deviceFingerprint }, 'New device fingerprint registered');
         return true;
       }
       return false;
     } catch (error) {
-      console.error('Failed to check device fingerprint:', error);
+      logger.error({ err: error, userId }, 'Failed to check device fingerprint');
       return false;
     }
   }
@@ -275,10 +279,21 @@ export class FraudService {
    * @returns Fraud detection result with detailed analysis
    */
   async detectFraud(transactionInput: FraudTransactionInput): Promise<FraudResult> {
+    const startTime = Date.now();
     let score = 0;
     const reasons: string[] = [];
     const heuristicsTriggered: string[] = [];
+    const heuristicDetails: Record<string, unknown> = {};
     const now = transactionInput.timestamp;
+
+    logger.debug({
+      transactionId: transactionInput.id,
+      userId: transactionInput.userId,
+      amount: transactionInput.amount,
+      phoneNumber: transactionInput.phoneNumber,
+      provider: transactionInput.provider,
+      type: transactionInput.type,
+    }, 'Starting fraud detection analysis');
 
     // Get user's transaction history
     const userTransactions = transactionInput.userId 
@@ -302,8 +317,20 @@ export class FraudService {
 
     if (recentTxns.length >= this.config.maxTransactionsPerHour) {
       score += this.config.velocityScore;
-      reasons.push(`Too many transactions (${recentTxns.length}) in ${this.config.timeWindowMs / (60 * 60 * 1000)} hours`);
+      const reason = `Too many transactions (${recentTxns.length}) in ${this.config.timeWindowMs / (60 * 60 * 1000)} hours`;
+      reasons.push(reason);
       heuristicsTriggered.push('velocity_check');
+      heuristicDetails.velocity_check = {
+        count: recentTxns.length,
+        threshold: this.config.maxTransactionsPerHour,
+        windowHours: this.config.timeWindowMs / (60 * 60 * 1000),
+        scoreAdded: this.config.velocityScore,
+      };
+      logger.warn({
+        transactionId: transactionInput.id,
+        heuristic: 'velocity_check',
+        ...heuristicDetails.velocity_check,
+      }, 'Velocity check triggered');
     }
 
     // 2. Rapid Succession: Transactions per minute
@@ -313,8 +340,19 @@ export class FraudService {
 
     if (rapidTxns.length >= this.config.maxTransactionsPerMinute) {
       score += this.config.rapidSuccessionScore;
-      reasons.push(`Rapid succession transactions (${rapidTxns.length}) in 1 minute`);
+      const reason = `Rapid succession transactions (${rapidTxns.length}) in 1 minute`;
+      reasons.push(reason);
       heuristicsTriggered.push('rapid_succession');
+      heuristicDetails.rapid_succession = {
+        count: rapidTxns.length,
+        threshold: this.config.maxTransactionsPerMinute,
+        scoreAdded: this.config.rapidSuccessionScore,
+      };
+      logger.warn({
+        transactionId: transactionInput.id,
+        heuristic: 'rapid_succession',
+        ...heuristicDetails.rapid_succession,
+      }, 'Rapid succession check triggered');
     }
 
     // 3. Amount Anomaly
@@ -325,8 +363,20 @@ export class FraudService {
 
     if (transactionInput.amount > avgAmount * this.config.amountMultiplier) {
       score += this.config.amountScore;
-      reasons.push(`Unusually large amount ($${transactionInput.amount} vs avg $${avgAmount.toFixed(2)})`);
+      const reason = `Unusually large amount ($${transactionInput.amount} vs avg $${avgAmount.toFixed(2)})`;
+      reasons.push(reason);
       heuristicsTriggered.push('amount_anomaly');
+      heuristicDetails.amount_anomaly = {
+        transactionAmount: transactionInput.amount,
+        averageAmount: avgAmount,
+        multiplier: this.config.amountMultiplier,
+        scoreAdded: this.config.amountScore,
+      };
+      logger.warn({
+        transactionId: transactionInput.id,
+        heuristic: 'amount_anomaly',
+        ...heuristicDetails.amount_anomaly,
+      }, 'Amount anomaly check triggered');
     }
 
     // 4. Geographic Anomaly
@@ -345,8 +395,22 @@ export class FraudService {
 
         if (distance > this.config.maxDistanceKm && timeDiff <= this.config.timeWindowMs) {
           score += this.config.geoScore;
-          reasons.push(`Suspicious location change (${distance.toFixed(2)}km in ${timeDiff / (60 * 60 * 1000)} hours)`);
+          const reason = `Suspicious location change (${distance.toFixed(2)}km in ${timeDiff / (60 * 60 * 1000)} hours)`;
+          reasons.push(reason);
           heuristicsTriggered.push('geographic_anomaly');
+          heuristicDetails.geographic_anomaly = {
+            distanceKm: distance,
+            timeDiffHours: timeDiff / (60 * 60 * 1000),
+            maxDistanceKm: this.config.maxDistanceKm,
+            scoreAdded: this.config.geoScore,
+            previousLocation: lastTxnWithLocation.locationMetadata,
+            currentLocation: transactionInput.location,
+          };
+          logger.warn({
+            transactionId: transactionInput.id,
+            heuristic: 'geographic_anomaly',
+            ...heuristicDetails.geographic_anomaly,
+          }, 'Geographic anomaly check triggered');
         }
       }
     }
@@ -354,8 +418,18 @@ export class FraudService {
     // 5. High-Risk Phone Number Check
     if (this.highRiskNumbers.has(transactionInput.phoneNumber)) {
       score += this.config.highRiskNumberScore;
-      reasons.push('Transaction from known high-risk phone number');
+      const reason = 'Transaction from known high-risk phone number';
+      reasons.push(reason);
       heuristicsTriggered.push('high_risk_number');
+      heuristicDetails.high_risk_number = {
+        phoneNumber: transactionInput.phoneNumber,
+        scoreAdded: this.config.highRiskNumberScore,
+      };
+      logger.warn({
+        transactionId: transactionInput.id,
+        heuristic: 'high_risk_number',
+        ...heuristicDetails.high_risk_number,
+      }, 'High-risk phone number check triggered');
     }
 
     // 6. IP Geolocation Mismatch
@@ -363,8 +437,20 @@ export class FraudService {
       const ipLocation = await this.getIPLocation(transactionInput.ipAddress);
       if (ipLocation && this.isLocationMismatch(ipLocation, transactionInput.location)) {
         score += this.config.ipMismatchScore;
-        reasons.push('IP geolocation does not match transaction location');
+        const reason = 'IP geolocation does not match transaction location';
+        reasons.push(reason);
         heuristicsTriggered.push('ip_geolocation_mismatch');
+        heuristicDetails.ip_geolocation_mismatch = {
+          ipAddress: transactionInput.ipAddress,
+          ipLocation,
+          transactionLocation: transactionInput.location,
+          scoreAdded: this.config.ipMismatchScore,
+        };
+        logger.warn({
+          transactionId: transactionInput.id,
+          heuristic: 'ip_geolocation_mismatch',
+          ...heuristicDetails.ip_geolocation_mismatch,
+        }, 'IP geolocation mismatch check triggered');
       }
     }
 
@@ -372,8 +458,20 @@ export class FraudService {
     const hour = now.getHours();
     if (hour >= this.config.unusualHoursStart || hour <= this.config.unusualHoursEnd) {
       score += this.config.unusualHoursScore;
-      reasons.push(`Transaction during unusual hours (${hour}:00)`);
+      const reason = `Transaction during unusual hours (${hour}:00)`;
+      reasons.push(reason);
       heuristicsTriggered.push('unusual_hours');
+      heuristicDetails.unusual_hours = {
+        hour,
+        unusualHoursStart: this.config.unusualHoursStart,
+        unusualHoursEnd: this.config.unusualHoursEnd,
+        scoreAdded: this.config.unusualHoursScore,
+      };
+      logger.info({
+        transactionId: transactionInput.id,
+        heuristic: 'unusual_hours',
+        ...heuristicDetails.unusual_hours,
+      }, 'Unusual hours check triggered');
     }
 
     // 8. Pattern Detection: Failed attempts
@@ -384,8 +482,20 @@ export class FraudService {
 
     if (failedAttempts.length >= 3) {
       score += this.config.patternScore;
-      reasons.push(`Multiple failed attempts (${failedAttempts.length}) in short time`);
+      const reason = `Multiple failed attempts (${failedAttempts.length}) in short time`;
+      reasons.push(reason);
       heuristicsTriggered.push('pattern_detection');
+      heuristicDetails.pattern_detection = {
+        failedCount: failedAttempts.length,
+        threshold: 3,
+        windowHours: this.config.timeWindowMs / (60 * 60 * 1000),
+        scoreAdded: this.config.patternScore,
+      };
+      logger.warn({
+        transactionId: transactionInput.id,
+        heuristic: 'pattern_detection',
+        ...heuristicDetails.pattern_detection,
+      }, 'Failed attempts pattern check triggered');
     }
 
     // 9. Device Fingerprint Anomaly
@@ -396,8 +506,18 @@ export class FraudService {
       );
       if (isNewDevice) {
         score += this.config.deviceAnomalyScore;
-        reasons.push('Transaction from new or unrecognized device');
+        const reason = 'Transaction from new or unrecognized device';
+        reasons.push(reason);
         heuristicsTriggered.push('device_anomaly');
+        heuristicDetails.device_anomaly = {
+          deviceFingerprint: transactionInput.deviceFingerprint,
+          scoreAdded: this.config.deviceAnomalyScore,
+        };
+        logger.warn({
+          transactionId: transactionInput.id,
+          heuristic: 'device_anomaly',
+          ...heuristicDetails.device_anomaly,
+        }, 'Device fingerprint anomaly check triggered');
       }
     }
 
@@ -409,16 +529,41 @@ export class FraudService {
       if (daysOld <= this.config.newAccountDays && 
           transactionInput.amount >= this.config.highValueThreshold) {
         score += this.config.newAccountScore;
-        reasons.push(`High-value transaction from new account (${daysOld.toFixed(1)} days old)`);
+        const reason = `High-value transaction from new account (${daysOld.toFixed(1)} days old)`;
+        reasons.push(reason);
         heuristicsTriggered.push('new_account_risk');
+        heuristicDetails.new_account_risk = {
+          accountAgeDays: daysOld,
+          thresholdDays: this.config.newAccountDays,
+          transactionAmount: transactionInput.amount,
+          highValueThreshold: this.config.highValueThreshold,
+          scoreAdded: this.config.newAccountScore,
+        };
+        logger.warn({
+          transactionId: transactionInput.id,
+          heuristic: 'new_account_risk',
+          ...heuristicDetails.new_account_risk,
+        }, 'New account risk check triggered');
       }
 
       // 11. KYC Level Risk
       if (user.kycLevel && this.isLowKYCLevel(user.kycLevel) && 
           transactionInput.amount >= this.config.highValueThreshold) {
         score += this.config.kycRiskScore;
-        reasons.push(`High-value transaction from low KYC level (${user.kycLevel})`);
+        const reason = `High-value transaction from low KYC level (${user.kycLevel})`;
+        reasons.push(reason);
         heuristicsTriggered.push('kyc_risk');
+        heuristicDetails.kyc_risk = {
+          kycLevel: user.kycLevel,
+          transactionAmount: transactionInput.amount,
+          highValueThreshold: this.config.highValueThreshold,
+          scoreAdded: this.config.kycRiskScore,
+        };
+        logger.warn({
+          transactionId: transactionInput.id,
+          heuristic: 'kyc_risk',
+          ...heuristicDetails.kyc_risk,
+        }, 'KYC level risk check triggered');
       }
     }
 
@@ -428,11 +573,39 @@ export class FraudService {
       score += this.config.frequencySpikeScore;
       reasons.push(frequencySpike);
       heuristicsTriggered.push('frequency_spike');
+      heuristicDetails.frequency_spike = {
+        description: frequencySpike,
+        scoreAdded: this.config.frequencySpikeScore,
+      };
+      logger.warn({
+        transactionId: transactionInput.id,
+        heuristic: 'frequency_spike',
+        ...heuristicDetails.frequency_spike,
+      }, 'Transaction frequency spike check triggered');
     }
 
     const isFraud = score >= this.config.fraudScoreThreshold;
     const riskLevel = this.calculateRiskLevel(score);
     const recommendedAction = this.getRecommendedAction(score, riskLevel);
+    const durationMs = Date.now() - startTime;
+
+    // Log comprehensive fraud detection result
+    logger.info({
+      transactionId: transactionInput.id,
+      userId: transactionInput.userId,
+      amount: transactionInput.amount,
+      provider: transactionInput.provider,
+      type: transactionInput.type,
+      isFraud,
+      score,
+      riskLevel,
+      recommendedAction,
+      reasonsCount: reasons.length,
+      heuristicsTriggered,
+      heuristicDetails,
+      durationMs,
+      transactionHistoryCount: userTransactions.length,
+    }, 'Fraud detection analysis complete');
 
     // Update metrics
     transactionTotal.inc({ 
@@ -477,9 +650,10 @@ export class FraudService {
       phoneNumber: transactionInput.phoneNumber,
       riskLevel: result.riskLevel,
       heuristicsTriggered: result.heuristicsTriggered,
+      recommendedAction: result.recommendedAction,
     };
 
-    console.warn(JSON.stringify(alert));
+    logger.warn(alert, 'Fraud alert generated');
   }
 
   /**
@@ -489,7 +663,7 @@ export class FraudService {
   addToReviewQueue(transactionInput: FraudTransactionInput): void {
     this.reviewQueue.push(transactionInput);
     // In production, persist to database or Redis queue
-    console.log(`Transaction ${transactionInput.id} added to review queue`);
+    logger.info({ transactionId: transactionInput.id, queueSize: this.reviewQueue.length }, 'Transaction added to review queue');
   }
 
   /**
@@ -519,6 +693,20 @@ export class FraudService {
 
     if (result.isFraud) {
       this.addToReviewQueue(transactionInput);
+      logger.warn({
+        transactionId: transactionInput.id,
+        userId: transactionInput.userId,
+        score: result.score,
+        riskLevel: result.riskLevel,
+        recommendedAction: result.recommendedAction,
+        heuristicsTriggered: result.heuristicsTriggered,
+      }, 'Transaction flagged as fraud, queued for review');
+    } else {
+      logger.info({
+        transactionId: transactionInput.id,
+        score: result.score,
+        riskLevel: result.riskLevel,
+      }, 'Transaction passed fraud check');
     }
 
     return result;
@@ -532,9 +720,9 @@ export class FraudService {
   async setTransactionToReview(transactionId: string): Promise<void> {
     try {
       await this.transactionModel.updateStatus(transactionId, TransactionStatus.Review);
-      console.log(`Transaction ${transactionId} set to Review status`);
+      logger.info({ transactionId }, 'Transaction set to Review status');
     } catch (error) {
-      console.error(`Failed to set transaction ${transactionId} to Review:`, error);
+      logger.error({ err: error, transactionId }, 'Failed to set transaction to Review');
       throw error;
     }
   }

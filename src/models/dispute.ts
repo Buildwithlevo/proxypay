@@ -585,4 +585,111 @@ export class DisputeModel {
 
     return result.rows;
   }
+
+  // ---------------------------------------------------------------------------
+  // #413 Evidence Organisation
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Update the category field on a single evidence item.
+   * Returns null if the evidence item does not belong to the dispute.
+   */
+  async updateEvidenceCategory(
+    evidenceId: string,
+    disputeId: string,
+    category: string,
+  ): Promise<DisputeEvidence | null> {
+    const result = await queryWrite<DisputeEvidence>(
+      `UPDATE dispute_evidence
+          SET category   = $3,
+              updated_at = NOW()
+        WHERE id         = $1
+          AND dispute_id = $2
+        RETURNING
+          id,
+          dispute_id    AS "disputeId",
+          file_name     AS "fileName",
+          file_type     AS "fileType",
+          file_size     AS "fileSize",
+          s3_key        AS "s3Key",
+          s3_url        AS "s3Url",
+          uploaded_by   AS "uploadedBy",
+          description,
+          category,
+          created_at    AS "createdAt"`,
+      [evidenceId, disputeId, category],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  /**
+   * Update the display_order of multiple evidence items in a single transaction.
+   * Returns the number of rows updated.
+   */
+  async reorderEvidence(
+    disputeId: string,
+    order: Array<{ id: string; position: number }>,
+  ): Promise<number> {
+    let updated = 0;
+    for (const item of order) {
+      const result = await queryWrite(
+        `UPDATE dispute_evidence
+            SET display_order = $3,
+                updated_at    = NOW()
+          WHERE id            = $1
+            AND dispute_id    = $2`,
+        [item.id, disputeId, item.position],
+      );
+      updated += result.rowCount ?? 0;
+    }
+    return updated;
+  }
+
+  /**
+   * Search evidence by keyword (file name, description) and optional category.
+   */
+  async searchEvidence(
+    disputeId: string,
+    query: string,
+    category?: string,
+  ): Promise<DisputeEvidence[]> {
+    const conditions: string[] = ['dispute_id = $1'];
+    const params: unknown[] = [disputeId];
+    let p = 2;
+
+    if (query) {
+      conditions.push(
+        `(file_name ILIKE $${p} OR description ILIKE $${p})`,
+      );
+      params.push(`%${query}%`);
+      p++;
+    }
+
+    if (category) {
+      conditions.push(`category = $${p++}`);
+      params.push(category);
+    }
+
+    const where = conditions.join(' AND ');
+
+    const result = await queryRead<DisputeEvidence>(
+      `SELECT
+         id,
+         dispute_id    AS "disputeId",
+         file_name     AS "fileName",
+         file_type     AS "fileType",
+         file_size     AS "fileSize",
+         s3_key        AS "s3Key",
+         s3_url        AS "s3Url",
+         uploaded_by   AS "uploadedBy",
+         description,
+         category,
+         created_at    AS "createdAt"
+       FROM dispute_evidence
+       WHERE ${where}
+       ORDER BY COALESCE(display_order, 0) ASC, created_at ASC`,
+      params,
+    );
+    return result.rows;
+  }
 }

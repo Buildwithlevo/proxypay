@@ -304,21 +304,36 @@ export const jobsTotal = new Counter({
   registers: [register],
 });
 
-// ---------------------------------------------------------------------------
-// Provider Webhook Authenticity Metrics
-// ---------------------------------------------------------------------------
-
-export const providerWebhookVerificationTotal = new Counter({
-  name: "provider_webhook_verification_total",
-  help: "Total number of incoming provider webhook signature verification attempts",
-  labelNames: ["provider", "outcome", "reason"],
+// Transaction Type Classifier Metrics (ML auto-categorisation)
+export const transactionClassificationsTotal = new Counter({
+  name: "transaction_classifications_total",
+  help: "Total number of transactions classified by the ML model",
+  labelNames: ["category"],
   registers: [register],
 });
 
-export const providerWebhookVerificationDurationSeconds = new Histogram({
-  name: "provider_webhook_verification_duration_seconds",
-  help: "Duration of provider webhook signature verification in seconds",
-  labelNames: ["provider", "outcome"],
-  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+export const transactionClassificationConfidence = new Histogram({
+  name: "transaction_classification_confidence",
+  help: "Confidence scores of ML transaction classifications",
+  buckets: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99],
+  registers: [register],
+});
+
+export const transactionClassifierAccuracy = new Gauge({
+  name: "transaction_classifier_accuracy",
+  help: "Accuracy of the transaction type classifier evaluated on human-labelled samples (0–1)",
+  registers: [register],
+});
+
+export const transactionClassifierFeedbackTotal = new Counter({
+  name: "transaction_classifier_feedback_total",
+  help: "Total number of human feedback corrections submitted for the classifier",
+  labelNames: ["corrected_category"],
+  registers: [register],
+});
+
+export const transactionClassifierTrainingSamples = new Gauge({
+  name: "transaction_classifier_training_samples",
+  help: "Number of labelled training samples stored for the transaction classifier",
   registers: [register],
 });

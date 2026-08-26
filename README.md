@@ -389,6 +389,15 @@ terraform plan -var-file=environments/production.tfvars
 terraform apply
 ```
 
+## 🛠️ Operations & Incident Response
+
+- **Deployment & rollback**: [docs/BRIDGE_DEPLOYMENT_RUNBOOK.md](docs/BRIDGE_DEPLOYMENT_RUNBOOK.md)
+- **Incident runbooks**: [docs/runbooks/](docs/runbooks/README.md) — step-by-step
+  diagnosis and mitigation for the top production incidents (provider down,
+  database index bloat, high API latency, queue backlog, Redis outage, Horizon
+  degradation, DB pool exhaustion, replica lag, ledger imbalance, elevated
+  error rate).
+
 ## 🤝 Contributing
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md).
