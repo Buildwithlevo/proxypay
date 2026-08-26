@@ -13,6 +13,7 @@ import { MonitoringService } from "../services/monitoringService";
 import { createPagerDutyService } from "../services/pagerDutyService";
 import { runProviderBalanceAlertJob } from "./balances";
 import { runProviderHealthCheckJob } from "./providerHealthCheck";
+import { runProviderTokenWatchdogJob } from "./providerTokenWatchdog";
 import { runKycTierUpgradeJob } from "./kycTierUpgradeJob";
 import { runLiquidityRebalanceJob } from "./liquidityRebalanceJob";
 import { runCrossChainMonitorJob } from "./crossChainMonitorJob";
@@ -115,6 +116,13 @@ const JOBS: JobConfig[] = [
     // Every 5 minutes - polls provider APIs for uptime and alerts on outages
     schedule: process.env.PROVIDER_HEALTH_CHECK_CRON || "*/5 * * * *",
     handler: runProviderHealthCheckJob,
+  },
+  {
+    name: "provider-token-watchdog",
+    // Every 5 minutes - detects expired/revoked provider credentials and dead
+    // or stale accounting OAuth tokens before they interrupt service
+    schedule: process.env.PROVIDER_TOKEN_WATCHDOG_CRON || "*/5 * * * *",
+    handler: runProviderTokenWatchdogJob,
   },
   {
     name: "provider-reconciliation",
