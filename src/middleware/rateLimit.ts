@@ -31,6 +31,10 @@ export const RATE_LIMIT_CONFIG = {
 
   // Suspicious queries: more than 50 items without pagination
   SUSPICIOUS_QUERY_THRESHOLD: 50,
+
+  // Global rate limit: 200 requests per minute per IP
+  GLOBAL_LIMIT: 200,
+  GLOBAL_WINDOW_MS: 60 * 1000, // 1 minute
 };
 
 /**
@@ -124,6 +128,44 @@ const logHighSeverity = (message: string, context: Record<string, unknown>) => {
 const generateRateLimitKey = (userId: string, endpoint: string): string => {
   return `ratelimit:${userId}:${endpoint}`;
 };
+
+/**
+ * Global rate limit middleware.
+ * Applies a per-IP sliding-window limit to all requests as a safety net.
+ */
+export async function globalRateLimit(req: Request, res: Response, next: NextFunction) {
+  const key = `ratelimit:global:${req.ip}`;
+  const { allowed, remaining, resetTime } = await checkRateLimit(
+    key,
+    RATE_LIMIT_CONFIG.GLOBAL_LIMIT,
+    RATE_LIMIT_CONFIG.GLOBAL_WINDOW_MS,
+  );
+
+  res.setHeader("X-RateLimit-Limit", RATE_LIMIT_CONFIG.GLOBAL_LIMIT);
+  res.setHeader("X-RateLimit-Remaining", remaining);
+  res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+  if (!allowed) {
+    const retryAfterSeconds = Math.ceil((resetTime - Date.now()) / 1000);
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+
+    logHighSeverity("Global rate limit exceeded", {
+      ip: req.ip,
+      limit: RATE_LIMIT_CONFIG.GLOBAL_LIMIT,
+      window: "1 minute",
+      path: req.path,
+      method: req.method,
+    });
+
+    return res.status(429).json({
+      error: "Too Many Requests",
+      message: "Global rate limit exceeded. Try again shortly.",
+      retryAfter: retryAfterSeconds,
+    });
+  }
+
+  next();
+}
 
 /**
  * Middleware: for sep24Routes (Deposit/Withdrawal)
@@ -532,3 +574,8 @@ export const cleanupRateLimitStore = () => {
 
 // Cleanup expired entries every 30 minutes
 setInterval(cleanupRateLimitStore, 30 * 60 * 1000);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Default export — applies the global IP-based rate limit to all requests.
+// ─────────────────────────────────────────────────────────────────────────────
+export default globalRateLimit;
