@@ -32,6 +32,9 @@
     "migrate:down": "tsx src/scripts/migrate.ts down",
     "migrate:create": "tsx src/scripts/migrate.ts create",
     "migrate:status": "tsx src/scripts/migrate.ts status",
+    "migrate:validate": "tsx src/scripts/migrate.ts validate",
+    "migrate:analyze": "tsx src/scripts/migrate.ts analyze",
+    "test:migrations": "jest --config jest.migrations.config.js --runInBand --forceExit",
     "seed": "tsx src/scripts/seed.ts",
     "reconcile:ledger": "tsx src/scripts/reconcile-ledger.ts",
     "backup:create": "tsx src/scripts/backup.ts",
@@ -55,7 +58,6 @@
     "sdk:build": "cd sdk && ./gradlew build",
     "sdk:generate:ts": "openapi-generator-cli generate -i http://localhost:3000/docs/openapi.json -c sdk-config-ts.yaml -o sdk-ts",
     "sdk:build:ts": "cd sdk-ts && npm install && npm run build",
-
     "test:load:ingestion-10k": "k6 run --vus-max 12000 -e SCENARIO=ingestion_10k tests/load/api.js",
     "test:load:spike-10k": "k6 run --vus-max 12000 -e SCENARIO=spike_10k tests/load/api.js",
     "test:load:traffic-spike": "k6 run --vus-max 6000 -e SCENARIO=traffic_spike tests/load/api.js",
