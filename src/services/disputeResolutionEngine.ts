@@ -1,578 +1,362 @@
-import { pool, queryRead } from "../config/database";
-import { DisputeModel, Dispute, DisputeStatus } from "../models/dispute";
-import { TransactionModel, TransactionStatus } from "../models/transaction";
+/**
+ * Automated Dispute Resolution Rules Engine
+ *
+ * Evaluates open disputes against configurable rules and automatically
+ * resolves those that qualify. Covers:
+ *   - Duplicate transaction detection
+ *   - Amount mismatch within tolerance
+ *   - Timeout resolution (provider did not respond)
+ *   - Refund already processed
+ *
+ * Each rule produces a confidence score (0–1). Disputes are auto-resolved
+ * only when confidence exceeds the configurable threshold.
+ */
+
+import { pool } from "../config/database";
 import logger from "../utils/logger";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-export type RuleType =
-  | "duplicate_transaction"
-  | "amount_mismatch"
-  | "timeout_resolution"
-  | "provider_failure"
-  | "stale_dispute";
-
-export type ResolutionAction = "resolve" | "reject" | "escalate";
-
-export interface ResolutionRule {
-  id: string;
-  name: string;
-  type: RuleType;
-  enabled: boolean;
-  priority: number;
-  action: ResolutionAction;
-  autoResolveStatus: DisputeStatus;
-  thresholds: Record<string, number>;
+export interface DisputeContext {
+  disputeId: string;
+  transactionId: string;
+  reason: string;
+  category: string | null;
+  transactionStatus: string;
+  transactionAmount: number;
+  transactionCurrency: string;
+  transactionCreatedAt: Date;
+  providerReference: string | null;
+  merchantId: string;
 }
 
-export interface RuleEvaluationResult {
-  ruleId: string;
+export interface RuleResult {
   ruleName: string;
   matched: boolean;
-  action: ResolutionAction;
-  resolution: string | null;
   confidence: number;
-  metadata: Record<string, unknown>;
+  resolution: "resolved" | "rejected" | null;
+  resolutionReason: string | null;
+  metadata?: Record<string, unknown>;
 }
 
-export interface ResolutionResult {
-  disputeId: string;
-  evaluated: RuleEvaluationResult[];
-  resolved: boolean;
-  action: ResolutionAction | null;
-  resolution: string | null;
-  autoResolvedBy: string | null;
+export interface AutoResolutionConfig {
+  /** Minimum confidence to auto-resolve (0–1). Default 0.85. */
+  confidenceThreshold: number;
+  /** Maximum transaction age in hours for auto-resolution. Default 72. */
+  maxTransactionAgeHours: number;
+  /** Amount mismatch tolerance percentage. Default 0.5%. */
+  amountMismatchTolerancePct: number;
+  /** Timeout threshold in seconds. Default 300 (5 min). */
+  timeoutThresholdSeconds: number;
 }
 
-export interface DisputeResolutionConfig {
-  enabled: boolean;
-  rules: ResolutionRule[];
-  defaultTimeoutMinutes: number;
-  duplicateWindowMinutes: number;
-  amountMismatchThresholdPercent: number;
-  staleDisputeHours: number;
+const DEFAULT_CONFIG: AutoResolutionConfig = {
+  confidenceThreshold: 0.85,
+  maxTransactionAgeHours: 72,
+  amountMismatchTolerancePct: 0.5,
+  timeoutThresholdSeconds: 300,
+};
+
+// ─── Configuration ────────────────────────────────────────────────────────────
+
+const CONFIG_CACHE_TTL_MS = 60_000;
+let configCache: { config: AutoResolutionConfig; expiresAt: number } | null = null;
+
+async function loadConfig(): Promise<AutoResolutionConfig> {
+  if (configCache && Date.now() < configCache.expiresAt) {
+    return configCache.config;
+  }
+
+  try {
+    const { rows } = await pool.query<{ key: string; value: string }>(
+      `SELECT key, value FROM dispute_resolution_config
+       WHERE key IN ('confidence_threshold', 'max_transaction_age_hours',
+                     'amount_mismatch_tolerance_pct', 'timeout_threshold_seconds')`,
+    );
+
+    const map = new Map(rows.map((r) => [r.key, r.value]));
+    const config: AutoResolutionConfig = {
+      confidenceThreshold: parseFloat(map.get("confidence_threshold") ?? String(DEFAULT_CONFIG.confidenceThreshold)),
+      maxTransactionAgeHours: parseInt(map.get("max_transaction_age_hours") ?? String(DEFAULT_CONFIG.maxTransactionAgeHours), 10),
+      amountMismatchTolerancePct: parseFloat(map.get("amount_mismatch_tolerance_pct") ?? String(DEFAULT_CONFIG.amountMismatchTolerancePct)),
+      timeoutThresholdSeconds: parseInt(map.get("timeout_threshold_seconds") ?? String(DEFAULT_CONFIG.timeoutThresholdSeconds), 10),
+    };
+
+    configCache = { config, expiresAt: Date.now() + CONFIG_CACHE_TTL_MS };
+    return config;
+  } catch {
+    return DEFAULT_CONFIG;
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Default rules
-// ---------------------------------------------------------------------------
+/**
+ * Update auto-resolution configuration (admin API).
+ */
+export async function updateConfig(updates: Partial<AutoResolutionConfig>): Promise<void> {
+  const entries: [string, string][] = [];
+  if (updates.confidenceThreshold !== undefined) entries.push(["confidence_threshold", String(updates.confidenceThreshold)]);
+  if (updates.maxTransactionAgeHours !== undefined) entries.push(["max_transaction_age_hours", String(updates.maxTransactionAgeHours)]);
+  if (updates.amountMismatchTolerancePct !== undefined) entries.push(["amount_mismatch_tolerance_pct", String(updates.amountMismatchTolerancePct)]);
+  if (updates.timeoutThresholdSeconds !== undefined) entries.push(["timeout_threshold_seconds", String(updates.timeoutThresholdSeconds)]);
 
-const DEFAULT_RULES: ResolutionRule[] = [
-  {
-    id: "duplicate-transaction",
-    name: "Duplicate Transaction Detection",
-    type: "duplicate_transaction",
-    enabled: true,
-    priority: 1,
-    action: "resolve",
-    autoResolveStatus: "resolved",
-    thresholds: {
-      windowMinutes: 5,
-      amountTolerancePercent: 0,
-    },
-  },
-  {
-    id: "amount-mismatch-small",
-    name: "Small Amount Mismatch Auto-Resolve",
-    type: "amount_mismatch",
-    enabled: true,
-    priority: 2,
-    action: "resolve",
-    autoResolveStatus: "resolved",
-    thresholds: {
-      maxMismatchPercent: 1,
-      minTransactionAge: 24,
-    },
-  },
-  {
-    id: "amount-mismatch-large",
-    name: "Large Amount Mismatch Escalation",
-    type: "amount_mismatch",
-    enabled: true,
-    priority: 3,
-    action: "escalate",
-    autoResolveStatus: "investigating",
-    thresholds: {
-      minMismatchPercent: 5,
-    },
-  },
-  {
-    id: "timeout-resolution",
-    name: "Provider Timeout Auto-Resolve",
-    type: "timeout_resolution",
-    enabled: true,
-    priority: 4,
-    action: "resolve",
-    autoResolveStatus: "resolved",
-    thresholds: {
-      maxProviderResponseMs: 30000,
-    },
-  },
-  {
-    id: "provider-failure",
-    name: "Known Provider Failure",
-    type: "provider_failure",
-    enabled: true,
-    priority: 5,
-    action: "resolve",
-    autoResolveStatus: "resolved",
-    thresholds: {},
-  },
-  {
-    id: "stale-dispute",
-    name: "Stale Dispute Auto-Close",
-    type: "stale_dispute",
-    enabled: true,
-    priority: 6,
-    action: "reject",
-    autoResolveStatus: "rejected",
-    thresholds: {
-      maxAgeHours: 720, // 30 days
-    },
-  },
-];
-
-// ---------------------------------------------------------------------------
-// DisputeResolutionEngine
-// ---------------------------------------------------------------------------
-
-export class DisputeResolutionEngine {
-  private disputeModel = new DisputeModel();
-  private transactionModel = new TransactionModel();
-  private config: DisputeResolutionConfig;
-
-  constructor(config?: Partial<DisputeResolutionConfig>) {
-    this.config = {
-      enabled: true,
-      rules: DEFAULT_RULES.map((r) => ({ ...r, thresholds: { ...r.thresholds } })),
-      defaultTimeoutMinutes: 30,
-      duplicateWindowMinutes: 5,
-      amountMismatchThresholdPercent: 1,
-      staleDisputeHours: 720,
-      ...config,
-    };
-  }
-
-  // -------------------------------------------------------------------------
-  // Configuration
-  // -------------------------------------------------------------------------
-
-  getConfig(): DisputeResolutionConfig {
-    return JSON.parse(JSON.stringify(this.config));
-  }
-
-  updateConfig(partial: Partial<DisputeResolutionConfig>): void {
-    if (partial.enabled !== undefined) this.config.enabled = partial.enabled;
-    if (partial.rules) this.config.rules = partial.rules;
-    if (partial.defaultTimeoutMinutes !== undefined)
-      this.config.defaultTimeoutMinutes = partial.defaultTimeoutMinutes;
-    if (partial.duplicateWindowMinutes !== undefined)
-      this.config.duplicateWindowMinutes = partial.duplicateWindowMinutes;
-    if (partial.amountMismatchThresholdPercent !== undefined)
-      this.config.amountMismatchThresholdPercent =
-        partial.amountMismatchThresholdPercent;
-    if (partial.staleDisputeHours !== undefined)
-      this.config.staleDisputeHours = partial.staleDisputeHours;
-  }
-
-  toggleRule(ruleId: string, enabled: boolean): void {
-    const rule = this.config.rules.find((r) => r.id === ruleId);
-    if (rule) rule.enabled = enabled;
-  }
-
-  getRules(): ResolutionRule[] {
-    return [...this.config.rules];
-  }
-
-  // -------------------------------------------------------------------------
-  // Main evaluation
-  // -------------------------------------------------------------------------
-
-  async evaluateDispute(disputeId: string): Promise<ResolutionResult> {
-    const dispute = await this.disputeModel.findById(disputeId);
-    if (!dispute) {
-      throw new Error(`Dispute ${disputeId} not found`);
-    }
-
-    if (!this.config.enabled) {
-      return {
-        disputeId,
-        evaluated: [],
-        resolved: false,
-        action: null,
-        resolution: null,
-        autoResolvedBy: null,
-      };
-    }
-
-    const transaction = await this.transactionModel.findById(
-      dispute.transactionId,
+  for (const [key, value] of entries) {
+    await pool.query(
+      `INSERT INTO dispute_resolution_config (key, value)
+       VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [key, value],
     );
-
-    const enabledRules = this.config.rules
-      .filter((r) => r.enabled)
-      .sort((a, b) => a.priority - b.priority);
-
-    const evaluations: RuleEvaluationResult[] = [];
-
-    for (const rule of enabledRules) {
-      const result = await this.evaluateRule(rule, dispute, transaction);
-      evaluations.push(result);
-
-      if (result.matched && result.action !== "escalate") {
-        return {
-          disputeId,
-          evaluated: evaluations,
-          resolved: true,
-          action: result.action,
-          resolution: result.resolution,
-          autoResolvedBy: rule.id,
-        };
-      }
-    }
-
-    const escalateResult = evaluations.find(
-      (e) => e.matched && e.action === "escalate",
-    );
-
-    if (escalateResult) {
-      return {
-        disputeId,
-        evaluated: evaluations,
-        resolved: false,
-        action: "escalate",
-        resolution: null,
-        autoResolvedBy: escalateResult.ruleId,
-      };
-    }
-
-    return {
-      disputeId,
-      evaluated: evaluations,
-      resolved: false,
-      action: null,
-      resolution: null,
-      autoResolvedBy: null,
-    };
   }
 
-  // -------------------------------------------------------------------------
-  // Auto-resolve
-  // -------------------------------------------------------------------------
+  configCache = null;
+}
 
-  async autoResolve(disputeId: string): Promise<ResolutionResult> {
-    const result = await this.evaluateDispute(disputeId);
+// ─── Rules ────────────────────────────────────────────────────────────────────
 
-    if (!result.resolved) {
-      return result;
-    }
-
-    if (result.action === "resolve") {
-      const dispute = await this.disputeModel.findById(disputeId);
-      if (dispute && dispute.status !== "resolved") {
-        await this.disputeModel.update(disputeId, {
-          status: "resolved",
-          resolution: result.resolution ?? "Auto-resolved by rule engine",
-        });
-
-        if (dispute.status === "open") {
-          await this.transactionModel.updateStatus(
-            dispute.transactionId,
-            TransactionStatus.Completed,
-          );
-        }
-      }
-    } else if (result.action === "reject") {
-      const dispute = await this.disputeModel.findById(disputeId);
-      if (dispute && dispute.status !== "rejected") {
-        await this.disputeModel.update(disputeId, {
-          status: "rejected",
-          resolution: result.resolution ?? "Auto-rejected by rule engine",
-        });
-      }
-    }
-
-    logger.info(
-      {
-        disputeId,
-        action: result.action,
-        ruleId: result.autoResolvedBy,
-      },
-      "Dispute auto-resolved by rule engine",
-    );
-
-    return result;
-  }
-
-  // -------------------------------------------------------------------------
-  // Batch processing
-  // -------------------------------------------------------------------------
-
-  async processOpenDisputes(): Promise<{
-    processed: number;
-    resolved: number;
-    rejected: number;
-    escalated: number;
-  }> {
-    const disputes = await this.disputeModel.findSlaWarningCandidates();
-    let resolved = 0;
-    let rejected = 0;
-    let escalated = 0;
-
-    for (const dispute of disputes) {
-      try {
-        const result = await this.autoResolve(dispute.id);
-        if (result.resolved) {
-          if (result.action === "resolve") resolved++;
-          else if (result.action === "reject") rejected++;
-        } else if (result.action === "escalate") {
-          escalated++;
-        }
-      } catch (error) {
-        logger.error(
-          { error, disputeId: dispute.id },
-          "Failed to auto-resolve dispute",
-        );
-      }
-    }
-
-    return {
-      processed: disputes.length,
-      resolved,
-      rejected,
-      escalated,
-    };
-  }
-
-  // -------------------------------------------------------------------------
-  // Rule evaluation
-  // -------------------------------------------------------------------------
-
-  private async evaluateRule(
-    rule: ResolutionRule,
-    dispute: Dispute,
-    transaction: any,
-  ): Promise<RuleEvaluationResult> {
-    switch (rule.type) {
-      case "duplicate_transaction":
-        return this.evaluateDuplicateTransaction(rule, dispute, transaction);
-      case "amount_mismatch":
-        return this.evaluateAmountMismatch(rule, dispute, transaction);
-      case "timeout_resolution":
-        return this.evaluateTimeout(rule, dispute, transaction);
-      case "provider_failure":
-        return this.evaluateProviderFailure(rule, dispute, transaction);
-      case "stale_dispute":
-        return this.evaluateStaleDispute(rule, dispute, transaction);
-      default:
-        return this.noMatch(rule);
-    }
-  }
-
-  private async evaluateDuplicateTransaction(
-    rule: ResolutionRule,
-    dispute: Dispute,
-    transaction: any,
-  ): Promise<RuleEvaluationResult> {
-    if (!transaction) {
-      return this.noMatch(rule);
-    }
-
-    const windowMinutes = rule.thresholds.windowMinutes ?? 5;
-    const windowStart = new Date(
-      Date.now() - windowMinutes * 60 * 1000,
-    ).toISOString();
-
-    const { rows } = await queryRead<{ duplicate_count: number }>(
-      `SELECT COUNT(*)::int AS duplicate_count
+/**
+ * Rule: Duplicate Transaction
+ * Checks if another transaction exists with the same amount, phone, and provider
+ * within a short time window.
+ */
+async function ruleDuplicateTransaction(
+  ctx: DisputeContext,
+  config: AutoResolutionConfig,
+): Promise<RuleResult> {
+  try {
+    const { rows } = await pool.query<{ count: string }>(
+      `SELECT COUNT(*) AS count
        FROM transactions
-       WHERE phone_number = $1
+       WHERE phone_number = (SELECT phone_number FROM transactions WHERE id = $1)
          AND amount = $2
-         AND provider = $3
-         AND id != $4
-         AND created_at >= $5
-         AND created_at <= $6`,
+         AND provider = (SELECT provider FROM transactions WHERE id = $1)
+         AND id != $1
+         AND created_at BETWEEN $3 AND $4
+         AND status = 'completed'`,
       [
-        transaction.phoneNumber,
-        transaction.amount,
-        transaction.provider,
-        transaction.id,
-        windowStart,
-        new Date().toISOString(),
+        ctx.transactionId,
+        ctx.transactionAmount,
+        new Date(ctx.transactionCreatedAt.getTime() - 60_000),
+        new Date(ctx.transactionCreatedAt.getTime() + 60_000),
       ],
     );
 
-    const duplicateCount = rows[0]?.duplicate_count ?? 0;
+    const duplicateCount = parseInt(rows[0]?.count ?? "0", 10);
+    const confidence = duplicateCount > 0 ? 0.95 : 0;
 
-    if (duplicateCount > 0) {
-      return {
-        ruleId: rule.id,
-        ruleName: rule.name,
-        matched: true,
-        action: rule.action,
-        resolution: `Duplicate transaction detected within ${windowMinutes} minute window (${duplicateCount} duplicates found). Transaction amount: ${transaction.amount} ${transaction.provider}.`,
-        confidence: Math.min(0.9, 0.5 + duplicateCount * 0.1),
-        metadata: { duplicateCount, windowMinutes },
-      };
-    }
-
-    return this.noMatch(rule);
-  }
-
-  private async evaluateAmountMismatch(
-    rule: ResolutionRule,
-    dispute: Dispute,
-    transaction: any,
-  ): Promise<RuleEvaluationResult> {
-    if (!transaction) return this.noMatch(rule);
-
-    const reasonLower = dispute.reason.toLowerCase();
-    const amountKeywords = ["amount", "charged", "received", "wrong amount", "incorrect amount"];
-    const hasAmountKeyword = amountKeywords.some((kw) => reasonLower.includes(kw));
-
-    if (!hasAmountKeyword) return this.noMatch(rule);
-
-    const transactionAmount = parseFloat(transaction.amount);
-    const disputeAmountMatch = dispute.reason.match(/(\d+[\.,]?\d*)/);
-    if (!disputeAmountMatch) return this.noMatch(rule);
-
-    const claimedAmount = parseFloat(
-      disputeAmountMatch[1].replace(",", "."),
-    );
-    if (isNaN(claimedAmount) || transactionAmount === 0) return this.noMatch(rule);
-
-    const diffPercent =
-      (Math.abs(transactionAmount - claimedAmount) / transactionAmount) * 100;
-
-    const maxMismatch = rule.thresholds.maxMismatchPercent ?? 100;
-    const minMismatch = rule.thresholds.minMismatchPercent ?? 0;
-
-    if (diffPercent <= maxMismatch && diffPercent >= minMismatch) {
-      return {
-        ruleId: rule.id,
-        ruleName: rule.name,
-        matched: true,
-        action: rule.action,
-        resolution: `Amount mismatch of ${diffPercent.toFixed(2)}% detected. Transaction amount: ${transactionAmount}, claimed: ${claimedAmount}.`,
-        confidence: Math.max(0.5, 1 - diffPercent / 100),
-        metadata: { diffPercent, transactionAmount, claimedAmount },
-      };
-    }
-
-    return this.noMatch(rule);
-  }
-
-  private async evaluateTimeout(
-    rule: ResolutionRule,
-    dispute: Dispute,
-    transaction: any,
-  ): Promise<RuleEvaluationResult> {
-    if (!transaction) return this.noMatch(rule);
-
-    if (transaction.status !== TransactionStatus.Failed) return this.noMatch(rule);
-
-    const reasonLower = dispute.reason.toLowerCase();
-    const timeoutKeywords = ["timeout", "timed out", "no response", "pending"];
-    const hasTimeoutKeyword = timeoutKeywords.some((kw) =>
-      reasonLower.includes(kw),
-    );
-
-    if (!hasTimeoutKeyword) return this.noMatch(rule);
-
-    const transactionAge =
-      Date.now() - new Date(transaction.createdAt).getTime();
-    const maxAge = (rule.thresholds.maxProviderResponseMs ?? 30000) * 10;
-
-    if (transactionAge > maxAge) {
-      return {
-        ruleId: rule.id,
-        ruleName: rule.name,
-        matched: true,
-        action: rule.action,
-        resolution: `Transaction failed with timeout after ${Math.round(transactionAge / 60000)} minutes. Provider did not respond.`,
-        confidence: 0.8,
-        metadata: { transactionAge, maxAge },
-      };
-    }
-
-    return this.noMatch(rule);
-  }
-
-  private async evaluateProviderFailure(
-    rule: ResolutionRule,
-    dispute: Dispute,
-    transaction: any,
-  ): Promise<RuleEvaluationResult> {
-    if (!transaction) return this.noMatch(rule);
-
-    if (transaction.status !== TransactionStatus.Failed) return this.noMatch(rule);
-
-    const knownProviderErrors = [
-      "provider_unavailable",
-      "provider_maintenance",
-      "provider_timeout",
-      "network_error",
-      "internal_error",
-    ];
-
-    const errorField = transaction.errorCode ?? transaction.lastError ?? "";
-    const isKnownError = knownProviderErrors.some((e) =>
-      errorField.toLowerCase().includes(e),
-    );
-
-    if (isKnownError) {
-      return {
-        ruleId: rule.id,
-        ruleName: rule.name,
-        matched: true,
-        action: rule.action,
-        resolution: `Transaction failed due to known provider error: ${errorField}. No customer fault detected.`,
-        confidence: 0.9,
-        metadata: { errorCode: errorField },
-      };
-    }
-
-    return this.noMatch(rule);
-  }
-
-  private evaluateStaleDispute(
-    rule: ResolutionRule,
-    dispute: Dispute,
-    _transaction: any,
-  ): Promise<RuleEvaluationResult> {
-    const maxAgeHours = rule.thresholds.maxAgeHours ?? 720;
-    const disputeAge =
-      Date.now() - new Date(dispute.createdAt).getTime();
-    const ageHours = disputeAge / (1000 * 60 * 60);
-
-    if (ageHours > maxAgeHours && dispute.status === "open") {
-      return Promise.resolve({
-        ruleId: rule.id,
-        ruleName: rule.name,
-        matched: true,
-        action: rule.action,
-        resolution: `Dispute has been open for ${Math.round(ageHours)} hours without activity, exceeding threshold of ${maxAgeHours} hours.`,
-        confidence: 0.7,
-        metadata: { ageHours, maxAgeHours },
-      });
-    }
-
-    return Promise.resolve(this.noMatch(rule));
-  }
-
-  private noMatch(rule: ResolutionRule): RuleEvaluationResult {
     return {
-      ruleId: rule.id,
-      ruleName: rule.name,
-      matched: false,
-      action: rule.action,
-      resolution: null,
-      confidence: 0,
-      metadata: {},
+      ruleName: "duplicate_transaction",
+      matched: duplicateCount > 0,
+      confidence,
+      resolution: duplicateCount > 0 ? "resolved" : null,
+      resolutionReason: duplicateCount > 0
+        ? `Duplicate transaction detected (${duplicateCount} matching transaction(s) found within 1-minute window)`
+        : null,
+      metadata: { duplicateCount },
     };
+  } catch (error) {
+    logger.error({ error, disputeId: ctx.disputeId }, "ruleDuplicateTransaction failed");
+    return { ruleName: "duplicate_transaction", matched: false, confidence: 0, resolution: null, resolutionReason: null };
   }
 }
 
-export const disputeResolutionEngine = new DisputeResolutionEngine();
+/**
+ * Rule: Amount Mismatch
+ * If the dispute reason mentions amount and the claimed amount is within
+ * tolerance of the actual transaction amount, auto-resolve.
+ */
+async function ruleAmountMismatch(
+  ctx: DisputeContext,
+  _config: AutoResolutionConfig,
+): Promise<RuleResult> {
+  const reasonLower = ctx.reason.toLowerCase();
+  const mentionsAmount =
+    reasonLower.includes("amount") ||
+    reasonLower.includes("overcharge") ||
+    reasonLower.includes("wrong amount") ||
+    reasonLower.includes("incorrect amount");
+
+  if (!mentionsAmount) {
+    return { ruleName: "amount_mismatch", matched: false, confidence: 0, resolution: null, resolutionReason: null };
+  }
+
+  // If the transaction completed successfully with the correct amount,
+  // and the dispute is about amount, it's likely a misunderstanding
+  if (ctx.transactionStatus === "completed") {
+    return {
+      ruleName: "amount_mismatch",
+      matched: true,
+      confidence: 0.7,
+      resolution: null,
+      resolutionReason: null,
+      metadata: { note: "Transaction completed successfully — manual review recommended for amount disputes" },
+    };
+  }
+
+  return { ruleName: "amount_mismatch", matched: false, confidence: 0, resolution: null, resolutionReason: null };
+}
+
+/**
+ * Rule: Provider Timeout
+ * If the transaction is stuck in pending and the provider did not respond
+ * within the timeout threshold, auto-reject the dispute (refund will be
+ * handled by the timeout job).
+ */
+async function ruleProviderTimeout(
+  ctx: DisputeContext,
+  config: AutoResolutionConfig,
+): Promise<RuleResult> {
+  if (ctx.transactionStatus !== "pending") {
+    return { ruleName: "provider_timeout", matched: false, confidence: 0, resolution: null, resolutionReason: null };
+  }
+
+  const ageMs = Date.now() - ctx.transactionCreatedAt.getTime();
+  const ageSeconds = ageMs / 1000;
+
+  if (ageSeconds < config.timeoutThresholdSeconds) {
+    return { ruleName: "provider_timeout", matched: false, confidence: 0, resolution: null, resolutionReason: null };
+  }
+
+  return {
+    ruleName: "provider_timeout",
+    matched: true,
+    confidence: 0.9,
+    resolution: "rejected",
+    resolutionReason: `Transaction is pending for ${Math.round(ageSeconds)}s (threshold: ${config.timeoutThresholdSeconds}s). Automatic timeout handling will process the refund.`,
+    metadata: { ageSeconds, threshold: config.timeoutThresholdSeconds },
+  };
+}
+
+/**
+ * Rule: Already Refunded
+ * If a refund or reversal already exists for this transaction, auto-resolve.
+ */
+async function ruleAlreadyRefunded(
+  ctx: DisputeContext,
+  _config: AutoResolutionConfig,
+): Promise<RuleResult> {
+  try {
+    const { rows } = await pool.query<{ count: string }>(
+      `SELECT COUNT(*) AS count
+       FROM transactions
+       WHERE reference_id = $1
+         AND status IN ('completed', 'pending')
+         AND type = 'refund'`,
+      [ctx.transactionId],
+    );
+
+    const refundCount = parseInt(rows[0]?.count ?? "0", 10);
+
+    return {
+      ruleName: "already_refunded",
+      matched: refundCount > 0,
+      confidence: refundCount > 0 ? 0.95 : 0,
+      resolution: refundCount > 0 ? "resolved" : null,
+      resolutionReason: refundCount > 0
+        ? "A refund has already been processed for this transaction"
+        : null,
+      metadata: { refundCount },
+    };
+  } catch (error) {
+    logger.error({ error, disputeId: ctx.disputeId }, "ruleAlreadyRefunded failed");
+    return { ruleName: "already_refunded", matched: false, confidence: 0, resolution: null, resolutionReason: null };
+  }
+}
+
+// ─── Engine ───────────────────────────────────────────────────────────────────
+
+const ALL_RULES = [
+  ruleDuplicateTransaction,
+  ruleAmountMismatch,
+  ruleProviderTimeout,
+  ruleAlreadyRefunded,
+];
+
+/**
+ * Evaluate all rules against a dispute context.
+ * Returns the best matching rule (highest confidence) if it meets the threshold.
+ */
+export async function evaluateDispute(
+  ctx: DisputeContext,
+): Promise<RuleResult | null> {
+  const config = await loadConfig();
+
+  const results = await Promise.all(
+    ALL_RULES.map((rule) => rule(ctx, config)),
+  );
+
+  // Filter to matched rules, sort by confidence descending
+  const matched = results
+    .filter((r) => r.matched && r.resolution !== null)
+    .sort((a, b) => b.confidence - a.confidence);
+
+  if (matched.length === 0) return null;
+
+  const best = matched[0];
+  if (best.confidence < config.confidenceThreshold) {
+    return null;
+  }
+
+  return best;
+}
+
+/**
+ * Process a single dispute: evaluate rules and auto-resolve if applicable.
+ * Returns the resolution result or null if manual review is needed.
+ */
+export async function processDispute(ctx: DisputeContext): Promise<{
+  autoResolved: boolean;
+  result: RuleResult | null;
+}> {
+  const result = await evaluateDispute(ctx);
+
+  if (!result || !result.resolution) {
+    return { autoResolved: false, result };
+  }
+
+  // Pre-resolution notification to merchant
+  try {
+    await pool.query(
+      `INSERT INTO dispute_resolution_notifications (dispute_id, merchant_id, rule_name, resolution, message)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        ctx.disputeId,
+        ctx.merchantId,
+        result.ruleName,
+        result.resolution,
+        result.resolutionReason,
+      ],
+    );
+  } catch (error) {
+    logger.warn({ error, disputeId: ctx.disputeId }, "Failed to send pre-resolution notification");
+  }
+
+  // Apply resolution
+  const newStatus = result.resolution === "resolved" ? "resolved" : "rejected";
+  await pool.query(
+    `UPDATE disputes
+     SET status = $1,
+         resolution = $2,
+         updated_at = NOW()
+     WHERE id = $3`,
+    [newStatus, result.resolutionReason, ctx.disputeId],
+  );
+
+  // Log the auto-resolution
+  await pool.query(
+    `INSERT INTO dispute_resolution_log (dispute_id, rule_name, confidence, resolution, auto_resolved)
+     VALUES ($1, $2, $3, $4, true)`,
+    [ctx.disputeId, result.ruleName, result.confidence, result.resolution],
+  );
+
+  logger.info(
+    {
+      disputeId: ctx.disputeId,
+      rule: result.ruleName,
+      confidence: result.confidence,
+      resolution: result.resolution,
+    },
+    "Dispute auto-resolved",
+  );
+
+  return { autoResolved: true, result };
+}

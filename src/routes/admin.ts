@@ -22,7 +22,7 @@ import {
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { getQueueStats } from "../queue/transactionQueue";
 import { redisClient } from "../config/redis";
-import { checkReplicaHealth, pool } from "../config/database";
+import { checkReplicaHealth, pool, getConnectionPoolStatistics, setReplicaEnabled, getReplicaStatuses } from "../config/database";
 import { UserModel } from "../models/users";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { StellarService } from "../services/stellar/stellarService";
@@ -3422,6 +3422,74 @@ router.get(
     } catch (error) {
       console.error("[Admin] Scope usage fetch failed:", error);
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch API key scope usage");
+    }
+  },
+);
+
+/**
+ * GET /api/admin/database/pool-stats
+ * Comprehensive connection pool statistics
+ */
+router.get(
+  "/database/pool-stats",
+  authenticateToken,
+  requirePermission("admin:system"),
+  async (_req: Request, res: Response) => {
+    try {
+      const stats = getConnectionPoolStatistics();
+      res.json({ success: true, data: stats });
+    } catch (error) {
+      console.error("[Admin] Pool stats fetch failed:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch pool statistics");
+    }
+  },
+);
+
+/**
+ * GET /api/admin/database/replicas
+ * Get current replica statuses
+ */
+router.get(
+  "/database/replicas",
+  authenticateToken,
+  requirePermission("admin:system"),
+  async (_req: Request, res: Response) => {
+    try {
+      const statuses = getReplicaStatuses();
+      res.json({ success: true, data: statuses });
+    } catch (error) {
+      console.error("[Admin] Replica status fetch failed:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch replica statuses");
+    }
+  },
+);
+
+/**
+ * PATCH /api/admin/database/replicas/:index
+ * Enable or disable a replica by index
+ */
+router.patch(
+  "/database/replicas/:index",
+  authenticateToken,
+  requirePermission("admin:system"),
+  async (req: Request, res: Response) => {
+    try {
+      const index = parseInt(req.params.index, 10);
+      const { enabled } = req.body as { enabled: boolean };
+
+      if (Number.isNaN(index)) {
+        return res.status(400).json({ error: "Index must be a number" });
+      }
+
+      const success = setReplicaEnabled(index, enabled);
+      if (!success) {
+        return res.status(404).json({ error: "Replica index not found" });
+      }
+
+      res.json({ success: true, message: `Replica ${index} ${enabled ? "enabled" : "disabled"}` });
+    } catch (error) {
+      console.error("[Admin] Replica toggle failed:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to toggle replica");
     }
   },
 );

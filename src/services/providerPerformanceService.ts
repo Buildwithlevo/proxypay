@@ -1,307 +1,265 @@
-import { pool } from "../config/database";
-import { providerSettingsService } from "./providerSettingsService";
-import logger from "../utils/logger";
+/**
+ * Provider Performance Optimization
+ *
+ * Latency-aware provider selection with success rate scoring, sticky sessions,
+ * and admin-configurable weights. Uses an exponential moving average (EMA) for
+ * smoothing latency observations so recent performance has more influence.
+ */
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import { pool } from "../config/database";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export type ProviderName = "mtn" | "airtel" | "orange";
 
-export interface PerformanceWeights {
-  latencyWeight: number;
-  successRateWeight: number;
-  recencyWeight: number;
-  stickyBonus: number;
-}
-
-export interface ProviderPerformanceMetrics {
+export interface ProviderScore {
   provider: ProviderName;
+  /** Composite score 0-100. Higher = better. */
+  score: number;
+  /** EMA of latency in ms. */
   avgLatencyMs: number;
-  p95LatencyMs: number;
+  /** Success rate 0-1. */
   successRate: number;
+  /** Total calls in the scoring window. */
   totalCalls: number;
-  recentCalls: number;
-  lastFailureAt: string | null;
-  latencyScore: number;
-  successRateScore: number;
-  compositeScore: number;
+  /** Whether this provider is sticky (preferred for the current session). */
+  sticky: boolean;
 }
 
-export interface PerformanceRanking {
-  rankings: ProviderPerformanceMetrics[];
-  weights: PerformanceWeights;
-  generatedAt: string;
+export interface ScoringWeights {
+  /** Weight for latency score component (default 40). */
+  latencyWeight: number;
+  /** Weight for success rate component (default 60). */
+  successWeight: number;
+  /** EMA smoothing factor 0-1 (default 0.3). */
+  emaAlpha: number;
 }
 
-export interface StickySession {
-  merchantId: string;
-  provider: ProviderName;
-  lockedAt: Date;
-  expiresAt: Date;
-}
-
-export interface ScoringConfig {
-  weights: PerformanceWeights;
-  stickySessionTtlMs: number;
-  latencyWindowMs: number;
-  minCallsForScoring: number;
-}
-
-// ---------------------------------------------------------------------------
-// Default configuration
-// ---------------------------------------------------------------------------
-
-const DEFAULT_WEIGHTS: PerformanceWeights = {
-  latencyWeight: 0.4,
-  successRateWeight: 0.4,
-  recencyWeight: 0.1,
-  stickyBonus: 0.1,
+const DEFAULT_WEIGHTS: ScoringWeights = {
+  latencyWeight: 40,
+  successWeight: 60,
+  emaAlpha: 0.3,
 };
 
-const DEFAULT_SCORING_CONFIG: ScoringConfig = {
-  weights: { ...DEFAULT_WEIGHTS },
-  stickySessionTtlMs: 30 * 60 * 1000, // 30 minutes
-  latencyWindowMs: 60 * 60 * 1000, // 1 hour
-  minCallsForScoring: 5,
-};
+// ─── In-Memory Score Cache ────────────────────────────────────────────────────
 
-// ---------------------------------------------------------------------------
-// ProviderPerformanceService
-// ---------------------------------------------------------------------------
+const SCORE_CACHE_KEY = "provider:performance:scores";
+const SCORE_CACHE_TTL_MS = 60_000; // 1 minute
 
-export class ProviderPerformanceService {
-  private stickySessions: Map<string, StickySession> = new Map();
-  private cachedRankings: PerformanceRanking | null = null;
-  private rankingsCacheTtlMs = 60_000;
-  private rankingsCacheExpiresAt = 0;
-  private config: ScoringConfig = { ...DEFAULT_SCORING_CONFIG };
+interface ScoreCacheEntry {
+  scores: ProviderScore[];
+  expiresAt: number;
+}
 
-  // -------------------------------------------------------------------------
-  // Configuration
-  // -------------------------------------------------------------------------
+let localCache: ScoreCacheEntry | null = null;
 
-  updateScoringConfig(partial: Partial<ScoringConfig>): void {
-    if (partial.weights) {
-      this.config.weights = { ...this.config.weights, ...partial.weights };
-    }
-    if (partial.stickySessionTtlMs !== undefined) {
-      this.config.stickySessionTtlMs = partial.stickySessionTtlMs;
-    }
-    if (partial.latencyWindowMs !== undefined) {
-      this.config.latencyWindowMs = partial.latencyWindowMs;
-    }
-    if (partial.minCallsForScoring !== undefined) {
-      this.config.minCallsForScoring = partial.minCallsForScoring;
-    }
-    this.invalidateCache();
+// ─── EMA Latency Tracking ────────────────────────────────────────────────────
+
+const emaLatencies = new Map<ProviderName, number>();
+const callCounts = new Map<ProviderName, number>();
+const successCounts = new Map<ProviderName, number>();
+
+export function recordProviderCall(
+  provider: ProviderName,
+  latencyMs: number,
+  success: boolean,
+  alpha: number = DEFAULT_WEIGHTS.emaAlpha,
+): void {
+  // Update EMA latency
+  const prev = emaLatencies.get(provider) ?? latencyMs;
+  emaLatencies.set(provider, prev * (1 - alpha) + latencyMs * alpha);
+
+  // Update counts
+  callCounts.set(provider, (callCounts.get(provider) ?? 0) + 1);
+  if (success) {
+    successCounts.set(provider, (successCounts.get(provider) ?? 0) + 1);
   }
+}
 
-  getScoringConfig(): ScoringConfig {
-    return { ...this.config, weights: { ...this.config.weights } };
-  }
+// ─── Scoring ──────────────────────────────────────────────────────────────────
 
-  // -------------------------------------------------------------------------
-  // Latency-aware provider selection
-  // -------------------------------------------------------------------------
+const MAX_LATENCY_MS = 10_000; // assumed max for normalization
 
-  async selectBestProvider(
-    excludeProviders: ProviderName[] = [],
-  ): Promise<ProviderName> {
-    const rankings = await this.getPerformanceRankings();
-    const available = rankings.rankings.filter(
-      (r) => !excludeProviders.includes(r.provider),
+function computeScores(weights: ScoringWeights = DEFAULT_WEIGHTS): ProviderScore[] {
+  const providers: ProviderName[] = ["mtn", "airtel", "orange"];
+
+  return providers.map((provider) => {
+    const latency = emaLatencies.get(provider) ?? 0;
+    const total = callCounts.get(provider) ?? 0;
+    const successes = successCounts.get(provider) ?? 0;
+    const successRate = total > 0 ? successes / total : 1;
+
+    // Latency score: 100 when 0ms, 0 when >= MAX_LATENCY_MS
+    const latencyScore = Math.max(
+      0,
+      Math.min(100, 100 * (1 - latency / MAX_LATENCY_MS)),
     );
 
-    if (available.length === 0) {
-      return "mtn";
-    }
+    const successScore = successRate * 100;
 
-    return available[0].provider;
-  }
+    const score =
+      (latencyScore * weights.latencyWeight + successScore * weights.successWeight) /
+      (weights.latencyWeight + weights.successWeight);
 
-  async selectBestProviderForMerchant(
-    merchantId: string,
-    excludeProviders: ProviderName[] = [],
-  ): Promise<ProviderName> {
-    const sticky = this.stickySessions.get(merchantId);
-    if (sticky && sticky.expiresAt > new Date()) {
-      if (!excludeProviders.includes(sticky.provider)) {
-        return sticky.provider;
+    return {
+      provider,
+      score: Math.round(score * 100) / 100,
+      avgLatencyMs: Math.round(latency * 100) / 100,
+      successRate: Math.round(successRate * 10000) / 10000,
+      totalCalls: total,
+      sticky: false,
+    };
+  });
+}
+
+// ─── Sticky Sessions ──────────────────────────────────────────────────────────
+
+const stickySessions = new Map<string, ProviderName>(); // sessionKey → provider
+
+export function setStickySession(
+  sessionKey: string,
+  provider: ProviderName,
+): void {
+  stickySessions.set(sessionKey, provider);
+}
+
+export function clearStickySession(sessionKey: string): void {
+  stickySessions.delete(sessionKey);
+}
+
+export function getStickyProvider(sessionKey: string): ProviderName | null {
+  return stickySessions.get(sessionKey) ?? null;
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+/**
+ * Select the best provider for a given session.
+ * Considers latency, success rate, and sticky preference.
+ */
+export async function selectBestProvider(
+  sessionKey?: string,
+  weights: ScoringWeights = DEFAULT_WEIGHTS,
+): Promise<ProviderScore> {
+  // Check sticky session first
+  if (sessionKey) {
+    const sticky = getStickyProvider(sessionKey);
+    if (sticky) {
+      const scores = computeScores(weights);
+      const stickyScore = scores.find((s) => s.provider === sticky);
+      if (stickyScore) {
+        stickyScore.sticky = true;
+        return stickyScore;
       }
     }
-
-    const best = await this.selectBestProvider(excludeProviders);
-    this.setStickySession(merchantId, best);
-    return best;
   }
 
-  // -------------------------------------------------------------------------
-  // Sticky sessions
-  // -------------------------------------------------------------------------
+  const scores = computeScores(weights);
 
-  setStickySession(merchantId: string, provider: ProviderName): void {
-    const now = new Date();
-    this.stickySessions.set(merchantId, {
-      merchantId,
-      provider,
-      lockedAt: now,
-      expiresAt: new Date(now.getTime() + this.config.stickySessionTtlMs),
-    });
+  // Sort by score descending
+  scores.sort((a, b) => b.score - a.score);
+
+  const best = scores[0];
+
+  // Set sticky session
+  if (sessionKey && best) {
+    setStickySession(sessionKey, best.provider);
   }
 
-  getStickySession(merchantId: string): StickySession | null {
-    const session = this.stickySessions.get(merchantId);
-    if (!session) return null;
-    if (session.expiresAt <= new Date()) {
-      this.stickySessions.delete(merchantId);
-      return null;
+  return best;
+}
+
+/**
+ * Get current performance rankings for all providers.
+ * Uses Redis cache with 1-minute TTL, falls back to local calculation.
+ */
+export async function getProviderRankings(
+  weights: ScoringWeights = DEFAULT_WEIGHTS,
+): Promise<ProviderScore[]> {
+  // Check local cache
+  if (localCache && Date.now() < localCache.expiresAt) {
+    return localCache.scores;
+  }
+
+  // Try Redis cache
+  try {
+    const { redisClient } = await import("../config/redis");
+    const raw = await redisClient.get(SCORE_CACHE_KEY);
+    if (raw) {
+      const cached = JSON.parse(raw) as ProviderScore[];
+      localCache = { scores: cached, expiresAt: Date.now() + SCORE_CACHE_TTL_MS };
+      return cached;
     }
-    return session;
+  } catch {
+    // Redis unavailable
   }
 
-  clearStickySession(merchantId: string): void {
-    this.stickySessions.delete(merchantId);
-  }
+  const scores = computeScores(weights);
 
-  clearAllStickySessions(): void {
-    this.stickySessions.clear();
-  }
+  // Sort by score descending for rankings
+  scores.sort((a, b) => b.score - a.score);
 
-  // -------------------------------------------------------------------------
-  // Performance rankings
-  // -------------------------------------------------------------------------
-
-  async getPerformanceRankings(): Promise<PerformanceRanking> {
-    if (this.cachedRankings && Date.now() < this.rankingsCacheExpiresAt) {
-      return this.cachedRankings;
-    }
-
-    const rankings = await this.computePerformanceRankings();
-    this.cachedRankings = rankings;
-    this.rankingsCacheExpiresAt = Date.now() + this.rankingsCacheTtlMs;
-    return rankings;
-  }
-
-  async computePerformanceRankings(): Promise<PerformanceRanking> {
-    const providers: ProviderName[] = ["mtn", "airtel", "orange"];
-    const windowStart = new Date(
-      Date.now() - this.config.latencyWindowMs,
-    ).toISOString();
-
-    const metrics: ProviderPerformanceMetrics[] = [];
-
-    for (const provider of providers) {
-      const m = await this.computeProviderMetrics(provider, windowStart);
-      metrics.push(m);
-    }
-
-    const weights = this.config.weights;
-
-    for (const m of metrics) {
-      m.latencyScore = this.normalizeLatencyScore(m.avgLatencyMs);
-      m.successRateScore = m.successRate;
-      m.compositeScore =
-        m.latencyScore * weights.latencyWeight +
-        m.successRateScore * weights.successRateWeight +
-        m.successRateScore * weights.recencyWeight;
-    }
-
-    metrics.sort((a, b) => b.compositeScore - a.compositeScore);
-
-    return {
-      rankings: metrics,
-      weights,
-      generatedAt: new Date().toISOString(),
-    };
-  }
-
-  // -------------------------------------------------------------------------
-  // Record outcomes
-  // -------------------------------------------------------------------------
-
-  async recordProviderCall(
-    provider: ProviderName,
-    success: boolean,
-    latencyMs: number,
-  ): Promise<void> {
-    await pool.query(
-      `INSERT INTO provider_api_calls (provider, success, duration_ms, called_at)
-       VALUES ($1, $2, $3, NOW())`,
-      [provider, success, latencyMs],
+  // Cache in Redis
+  try {
+    const { redisClient } = await import("../config/redis");
+    await redisClient.setEx(
+      SCORE_CACHE_KEY,
+      Math.ceil(SCORE_CACHE_TTL_MS / 1000),
+      JSON.stringify(scores),
     );
-
-    this.invalidateCache();
+  } catch {
+    // Redis write failure — continue with local cache
   }
 
-  // -------------------------------------------------------------------------
-  // Admin: reset sticky for merchant
-  // -------------------------------------------------------------------------
+  localCache = { scores, expiresAt: Date.now() + SCORE_CACHE_TTL_MS };
+  return scores;
+}
 
-  async resetMerchantStickySession(merchantId: string): Promise<void> {
-    this.clearStickySession(merchantId);
-  }
+/**
+ * Persist scoring weights to the database (admin configuration).
+ */
+export async function updateScoringWeights(
+  latencyWeight: number,
+  successWeight: number,
+  emaAlpha: number,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO provider_scoring_config (key, value)
+     VALUES ('latency_weight', $1),
+            ('success_weight', $2),
+            ('ema_alpha', $3)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    [String(latencyWeight), String(successWeight), String(emaAlpha)],
+  );
 
-  // -------------------------------------------------------------------------
-  // Private helpers
-  // -------------------------------------------------------------------------
-
-  private async computeProviderMetrics(
-    provider: ProviderName,
-    windowStart: string,
-  ): Promise<ProviderPerformanceMetrics> {
-    const { rows } = await pool.query<{
-      total: string;
-      successes: string;
-      avg_latency: string | null;
-      p95_latency: string | null;
-      recent_calls: string;
-      last_failure: string | null;
-    }>(
-      `SELECT
-        COUNT(*)::text                                    AS total,
-        COUNT(*) FILTER (WHERE success)::text             AS successes,
-        AVG(duration_ms)::text                            AS avg_latency,
-        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms)::text AS p95_latency,
-        COUNT(*) FILTER (WHERE called_at >= $2)::text     AS recent_calls,
-        MAX(CASE WHEN NOT success THEN called_at END)::text AS last_failure
-       FROM provider_api_calls
-       WHERE provider = $1`,
-      [provider, windowStart],
-    );
-
-    const row = rows[0];
-    const totalCalls = Number(row.total) || 0;
-    const successes = Number(row.successes) || 0;
-    const avgLatency = row.avg_latency ? Number(row.avg_latency) : 0;
-    const p95Latency = row.p95_latency ? Number(row.p95_latency) : 0;
-    const recentCalls = Number(row.recent_calls) || 0;
-    const successRate = totalCalls > 0 ? successes / totalCalls : 0;
-
-    return {
-      provider,
-      avgLatencyMs: Math.round(avgLatency),
-      p95LatencyMs: Math.round(p95Latency),
-      successRate: Math.round(successRate * 1000) / 1000,
-      totalCalls,
-      recentCalls,
-      lastFailureAt: row.last_failure,
-      latencyScore: 0,
-      successRateScore: 0,
-      compositeScore: 0,
-    };
-  }
-
-  private normalizeLatencyScore(avgLatencyMs: number): number {
-    if (avgLatencyMs === 0) return 1;
-    if (avgLatencyMs >= 10000) return 0;
-    return Math.max(0, 1 - avgLatencyMs / 10000);
-  }
-
-  private invalidateCache(): void {
-    this.cachedRankings = null;
-    this.rankingsCacheExpiresAt = 0;
+  // Invalidate caches
+  localCache = null;
+  try {
+    const { redisClient } = await import("../config/redis");
+    await redisClient.del(SCORE_CACHE_KEY);
+  } catch {
+    // swallow
   }
 }
 
-export const providerPerformanceService = new ProviderPerformanceService();
+/**
+ * Load scoring weights from the database.
+ */
+export async function loadScoringWeights(): Promise<ScoringWeights> {
+  try {
+    const { rows } = await pool.query<{ key: string; value: string }>(
+      `SELECT key, value FROM provider_scoring_config
+       WHERE key IN ('latency_weight', 'success_weight', 'ema_alpha')`,
+    );
+
+    const map = new Map(rows.map((r) => [r.key, r.value]));
+
+    return {
+      latencyWeight: parseFloat(map.get("latency_weight") ?? String(DEFAULT_WEIGHTS.latencyWeight)),
+      successWeight: parseFloat(map.get("success_weight") ?? String(DEFAULT_WEIGHTS.successWeight)),
+      emaAlpha: parseFloat(map.get("ema_alpha") ?? String(DEFAULT_WEIGHTS.emaAlpha)),
+    };
+  } catch {
+    return DEFAULT_WEIGHTS;
+  }
+}
