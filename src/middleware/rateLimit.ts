@@ -532,3 +532,9 @@ export const cleanupRateLimitStore = () => {
 
 // Cleanup expired entries every 30 minutes
 setInterval(cleanupRateLimitStore, 30 * 60 * 1000);
+
+/**
+ * Default export: Combined rate limit middleware for general API protection.
+ * Applies list query limits followed by the next middleware.
+ */
+export default rateLimitAdminOperations;

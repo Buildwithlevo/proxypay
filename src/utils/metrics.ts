@@ -170,6 +170,12 @@ export const dbReplicaReadEnabled = new Gauge({
   registers: [register],
 });
 
+export const dbReplicaFailoversTotal = new Counter({
+  name: "db_replica_failovers_total",
+  help: "Total number of read query failovers from replica to primary",
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics
@@ -338,68 +344,33 @@ export const transactionClassifierTrainingSamples = new Gauge({
   registers: [register],
 });
 
-// ──── Transaction Processing Rate Metrics (for HPA scaling) ────
-
-/**
- * Transaction processing rate (transactions per second).
- * This metric is used for HPA scaling decisions based on application-level metrics.
- */
-export const transactionProcessingRate = new Gauge({
-  name: "transaction_processing_rate",
-  help: "Current transaction processing rate (transactions per second)",
-  labelNames: ["provider", "type"],
+// Webhook Retry Metrics
+export const webhookRetryAttemptsTotal = new Counter({
+  name: "webhook_retry_attempts_total",
+  help: "Total number of webhook retry attempts",
+  labelNames: ["event_type", "attempt", "status_code"],
   registers: [register],
 });
 
-/**
- * Transaction queue depth (pending transactions waiting to be processed).
- * This is the primary metric for worker autoscaling.
- */
-export const transactionQueueDepth = new Gauge({
-  name: "transaction_queue_depth",
-  help: "Number of transactions waiting to be processed",
-  labelNames: ["queue", "status"],
+export const webhookDeliveryDurationSeconds = new Histogram({
+  name: "webhook_delivery_duration_seconds",
+  help: "Duration of webhook delivery attempts in seconds",
+  labelNames: ["event_type", "status"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30],
   registers: [register],
 });
 
-/**
- * Provider-specific transaction rate.
- * Allows scaling based on individual provider load.
- */
-export const providerTransactionRate = new Gauge({
-  name: "provider_transaction_rate",
-  help: "Transaction rate per provider (transactions per second)",
-  labelNames: ["provider"],
+export const webhookDeliveryRetriesTotal = new Counter({
+  name: "webhook_delivery_retries_total",
+  help: "Total number of webhook deliveries that required retries",
+  labelNames: ["event_type", "final_status"],
   registers: [register],
 });
 
-/**
- * Provider queue depth.
- * Allows scaling based on individual provider queue depth.
- */
-export const providerQueueDepth = new Gauge({
-  name: "provider_queue_depth",
-  help: "Queue depth per provider",
-  labelNames: ["provider"],
-  registers: [register],
-});
-
-/**
- * Transaction processing latency (P95).
- * Used for latency-based scaling decisions.
- */
-export const transactionProcessingLatencyP95 = new Gauge({
-  name: "transaction_processing_latency_p95_seconds",
-  help: "P95 transaction processing latency in seconds",
-  registers: [register],
-});
-
-/**
- * Worker utilization ratio.
- * Ratio of active workers to total workers. Used for scaling decisions.
- */
-export const workerUtilizationRatio = new Gauge({
-  name: "worker_utilization_ratio",
-  help: "Ratio of active workers to total workers (0-1)",
+export const webhookBackoffDelaySeconds = new Histogram({
+  name: "webhook_backoff_delay_seconds",
+  help: "Backoff delay applied between webhook retry attempts in seconds",
+  labelNames: ["event_type", "attempt"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
   registers: [register],
 });
