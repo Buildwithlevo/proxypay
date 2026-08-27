@@ -99,6 +99,18 @@ export const configSchema = convict({
         default: 1000000,
         env: "AIRTEL_MAX_AMOUNT",
       },
+      callbackSecret: {
+        doc: "Airtel callback HMAC secret for verifying incoming callbacks",
+        format: String,
+        default: "",
+        env: "AIRTEL_CALLBACK_SECRET",
+      },
+      callbackSignatureHeader: {
+        doc: "Header used by Airtel for callback signature verification",
+        format: String,
+        default: "X-Airtel-Signature",
+        env: "AIRTEL_CALLBACK_SIGNATURE_HEADER",
+      },
     },
     orange: {
       minAmount: {
@@ -112,6 +124,18 @@ export const configSchema = convict({
         format: "nat",
         default: 750000,
         env: "ORANGE_MAX_AMOUNT",
+      },
+      callbackSecret: {
+        doc: "Orange callback HMAC secret for verifying incoming callbacks",
+        format: String,
+        default: "",
+        env: "ORANGE_CALLBACK_SECRET",
+      },
+      callbackSignatureHeader: {
+        doc: "Header used by Orange for callback signature verification",
+        format: String,
+        default: "X-Orange-Signature",
+        env: "ORANGE_CALLBACK_SIGNATURE_HEADER",
       },
     },
   },

@@ -1,13 +1,7 @@
 import { Pool, QueryConfig, QueryResult, QueryResultRow, PoolClient } from "pg";
 import { auditService } from "../services/auditlogService";
 import { isReadOnlyQuery } from "../utils/readOnlyDetector";
-import {
-  dbReplicaLagSeconds,
-  dbReplicaReadEnabled,
-  dbDrMode,
-  dbReplicationStatus,
-  dbReplicaCount,
-} from "../utils/metrics";
+import { dbReplicaLagSeconds, dbReplicaReadEnabled, dbReplicaFailoversTotal } from "../utils/metrics";
 import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
 
 const DR_DATABASE_URL = process.env.DR_DATABASE_URL;
@@ -306,9 +300,11 @@ async function refreshReplicaStatus(idx: number): Promise<void> {
     const result = await client.query<{ lag_seconds: number | null }>(query);
     lagSeconds = result.rows?.[0]?.lag_seconds ?? null;
     healthy = true;
+    markReplicaHealthy(url);
   } catch (error) {
     healthy = false;
     lagSeconds = null;
+    markReplicaUnhealthy(url, error instanceof Error ? error.message : String(error));
     console.warn(`Replica health check failed for ${url}:`, error);
   } finally {
     client?.release();
@@ -336,13 +332,15 @@ function startReplicaLagMonitor(): void {
 startReplicaLagMonitor();
 
 /**
- * Execute a read-only SQL query against a replica pool if available.
- * If the replica is unreachable (pool error or connection failure) the query
- * automatically falls over to the primary pool so callers are unaffected.
+ * Execute a read-only SQL query against a replica pool with retry and fallback.
+ * If the replica fails, retries with exponential backoff and falls back to primary.
  *
  * @param text   - The parameterised SQL query string
  * @param params - Optional query parameters
  */
+const REPLICA_RETRY_ATTEMPTS = parseInt(process.env.REPLICA_RETRY_ATTEMPTS || "2", 10);
+const REPLICA_RETRY_BASE_MS = parseInt(process.env.REPLICA_RETRY_BASE_MS || "100", 10);
+
 export async function queryRead<T extends import("pg").QueryResultRow = any>(
   text: string,
   params?: unknown[],
@@ -350,20 +348,29 @@ export async function queryRead<T extends import("pg").QueryResultRow = any>(
   const replicaPool = getNextReplicaPool();
 
   if (replicaPool) {
-    let client: PoolClient | null = null;
-    try {
-      client = await replicaPool.connect();
-      const result = await client.query<T>(text, params);
-      return result;
-    } catch (err) {
-      // Log replica failure and fall back to primary
-      console.warn("Read replica query failed, falling back to primary:", err);
-    } finally {
-      client?.release();
+    for (let attempt = 0; attempt <= REPLICA_RETRY_ATTEMPTS; attempt++) {
+      let client: PoolClient | null = null;
+      try {
+        client = await replicaPool.connect();
+        const result = await client.query<T>(text, params);
+        return result;
+      } catch (err) {
+        console.warn(
+          `Read replica query failed (attempt ${attempt + 1}/${REPLICA_RETRY_ATTEMPTS + 1}):`,
+          err,
+        );
+        if (attempt < REPLICA_RETRY_ATTEMPTS) {
+          const delayMs = REPLICA_RETRY_BASE_MS * Math.pow(2, attempt);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      } finally {
+        client?.release();
+      }
     }
+    dbReplicaFailoversTotal.inc();
+    console.warn("All replica attempts exhausted, falling back to primary");
   }
 
-  // Fall back: use primary pool (which goes through PgBouncer)
   return pool.query<T>(text, params);
 }
 
@@ -415,6 +422,23 @@ export async function checkReplicaHealth(): Promise<
       return { url, healthy, enabled, lagSeconds };
     }),
   );
+}
+
+/**
+ * Enable or disable a replica by index (0-based).
+ * Useful for manual failover via admin API.
+ */
+export function setReplicaEnabled(index: number, enabled: boolean): boolean {
+  if (index < 0 || index >= replicaStatuses.length) return false;
+  replicaStatuses[index].enabled = enabled;
+  return true;
+}
+
+/**
+ * Get current replica statuses (read-only snapshot).
+ */
+export function getReplicaStatuses(): ReplicaStatus[] {
+  return replicaStatuses.map((s) => ({ ...s }));
 }
 
 /**
@@ -567,40 +591,41 @@ export async function getPoolStats(): Promise<{
 }
 
 /**
- * Aggregated replication status for health endpoints and dashboards.
- * Reports DR mode, per-replica health/lag, and an overall status.
- * Replication lag alone never takes the service down (reads fall back to the
- * primary), so this is informational for /ready rather than gating readiness.
+ * Comprehensive connection pool statistics for monitoring.
+ * Returns pool metrics from the primary pool and all replica pools.
  */
-export async function getReplicationStatus(): Promise<{
-  drMode: "active" | "standby";
-  status: "ok" | "degraded";
+export function getConnectionPoolStatistics(): {
+  primary: {
+    totalCount: number;
+    idleCount: number;
+    waitingCount: number;
+    maxConnections: number;
+  };
   replicas: Array<{
     url: string;
-    healthy: boolean;
+    totalCount: number;
+    idleCount: number;
+    waitingCount: number;
     enabled: boolean;
+    healthy: boolean;
     lagSeconds: number | null;
   }>;
-  lagThresholdSeconds: number;
-}> {
-  const replicas = await checkReplicaHealth();
-  const degraded = replicas.some(
-    (r) =>
-      !r.healthy ||
-      !r.enabled ||
-      (r.lagSeconds !== null && r.lagSeconds > REPLICA_SYNC_LAG_THRESHOLD_SECONDS),
-  );
-
-  const status = degraded ? "degraded" : "ok";
-  const healthyEnabled = replicas.filter((r) => r.healthy && r.enabled).length;
-
-  dbReplicationStatus.set(status === "ok" ? 1 : status === "degraded" ? 0 : -1);
-  dbReplicaCount.set(healthyEnabled);
-
+} {
   return {
-    drMode: isDRMode() ? "active" : "standby",
-    status,
-    replicas,
-    lagThresholdSeconds: REPLICA_SYNC_LAG_THRESHOLD_SECONDS,
+    primary: {
+      totalCount: pool.totalCount,
+      idleCount: pool.idleCount,
+      waitingCount: pool.waitingCount,
+      maxConnections: pool.options?.max ?? 100,
+    },
+    replicas: replicaUrls.map((url, idx) => ({
+      url,
+      totalCount: replicaPools[idx]?.totalCount ?? 0,
+      idleCount: replicaPools[idx]?.idleCount ?? 0,
+      waitingCount: replicaPools[idx]?.waitingCount ?? 0,
+      enabled: replicaStatuses[idx]?.enabled ?? false,
+      healthy: replicaStatuses[idx]?.healthy ?? false,
+      lagSeconds: replicaStatuses[idx]?.lagSeconds ?? null,
+    })),
   };
 }
