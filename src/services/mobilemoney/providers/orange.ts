@@ -619,6 +619,40 @@ export class OrangeProvider {
     }
   }
 
+  /**
+   * Probes whether the configured credentials/session are still accepted by
+   * Orange. In direct mode this fetches a fresh OAuth token; in web mode it
+   * ensures a valid session (re-logging in if needed); proxy mode is skipped
+   * because the proxy owns the credentials. Used by the provider token
+   * watchdog to detect revoked/expired credentials before they interrupt
+   * service.
+   */
+  async checkAuth(): Promise<{
+    success: boolean;
+    invalidCredentials?: boolean;
+    error?: unknown;
+  }> {
+    try {
+      if (this.mode === "proxy") {
+        return { success: true };
+      }
+
+      if (this.mode === "web") {
+        await this.ensureSession();
+        return { success: true };
+      }
+
+      const token = await this.authenticateDirect();
+      return { success: Boolean(token) };
+    } catch (error: any) {
+      return {
+        success: false,
+        invalidCredentials: isInvalidCredentialsError(error),
+        error,
+      };
+    }
+  }
+
   destroy(): void {
     this.destroyed = true;
     if (this.prefetchTimer) {
@@ -1110,4 +1144,20 @@ export class OrangeProvider {
       setTimeout(resolve, Math.min(250 * attempt, 1000)),
     );
   }
+}
+
+/**
+ * Classifies an error as invalid credentials (401/403). Providers using
+ * `validateStatus: () => true` throw plain Errors with the HTTP status in the
+ * message (e.g. "Orange direct auth failed with status 401"), while axios
+ * rejections carry `error.response.status`.
+ */
+function isInvalidCredentialsError(error: unknown): boolean {
+  if (!error) return false;
+
+  const anyError = error as { response?: { status?: number }; message?: string };
+  const status = anyError.response?.status;
+  if (status === 401 || status === 403) return true;
+
+  return /status\s+(401|403)\b/i.test(anyError.message ?? "");
 }

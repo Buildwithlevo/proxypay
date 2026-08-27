@@ -118,3 +118,28 @@ that just converts fast failures into slow ones and floods retries.
 - File provider-side incident reference; track their RCA.
 - **Related:** [04 Queue backlog](./04-queue-backlog.md) (parked payouts),
   [10 Elevated error rate](./10-elevated-error-rate.md).
+
+---
+
+## Credential expiry (prevention)
+
+The **provider token watchdog** (`provider-token-watchdog` cron job, every 5
+minutes) catches expired/revoked authentication before it becomes an outage:
+
+- **Mobile money (MTN/Airtel/Orange):** probes the provider auth endpoint with
+  real credentials. A `401/403` raises a CRITICAL PagerDuty incident
+  (`provider rejected our credentials`) instead of being counted as "up" by the
+  uptime watchdog. Rotate the API key/secret in the secrets store and roll pods
+  (`scripts/rotate-keys.ts` is for DB encryption keys, not provider secrets).
+- **Accounting (Xero/QuickBooks):**
+  - Access token already expired (scheduled refresh failed) → one auto-heal
+    refresh attempt; if that fails, a CRITICAL PagerDuty incident fires:
+    the refresh token has expired or been revoked and the user must
+    re-authorize via the OAuth connect flow.
+  - Refresh token stale (approaching the provider inactivity window: Xero
+    60 days, QuickBooks 100 days) → warning webhook alert
+    (`PROVIDER_TOKEN_ALERT_WEBHOOK_URL` / `SLACK_ALERTS_WEBHOOK_URL`) so the
+    integration is reused or reconnected before the token dies.
+
+PagerDuty events are deduplicated per provider/connection and auto-resolve when
+credentials are refreshed or the connection is reconnected.
