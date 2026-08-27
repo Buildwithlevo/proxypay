@@ -14,6 +14,20 @@ const DEFAULT_UPLOAD_TIMEOUT_MS = 30_000;
 const DEFAULT_BATCH_TIMEOUT_MS = 60_000;
 
 /**
+ * Default timeout values for common route categories.
+ * Import this config object to reference or override timeout defaults.
+ *
+ * @example
+ * import { ROUTE_TIMEOUT_DEFAULTS } from './middleware/routeTimeout';
+ * console.log(ROUTE_TIMEOUT_DEFAULTS.api); // 5000
+ */
+export const ROUTE_TIMEOUT_DEFAULTS: Readonly<Record<"api" | "upload" | "batch", number>> = {
+  api: DEFAULT_API_TIMEOUT_MS,
+  upload: DEFAULT_UPLOAD_TIMEOUT_MS,
+  batch: DEFAULT_BATCH_TIMEOUT_MS,
+} as const;
+
+/**
  * Admin-managed timeout overrides (in-memory, mutable at runtime).
  * Keys are route patterns like "POST /transactions" or "*" for global.
  */
