@@ -13,6 +13,7 @@ import { MonitoringService } from "../services/monitoringService";
 import { createPagerDutyService } from "../services/pagerDutyService";
 import { runProviderBalanceAlertJob } from "./balances";
 import { runProviderHealthCheckJob } from "./providerHealthCheck";
+import { runProviderTokenWatchdogJob } from "./providerTokenWatchdog";
 import { runKycTierUpgradeJob } from "./kycTierUpgradeJob";
 import { runLiquidityRebalanceJob } from "./liquidityRebalanceJob";
 import { runCrossChainMonitorJob } from "./crossChainMonitorJob";
@@ -35,8 +36,7 @@ import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { runTravelRuleAuditReportJob } from "./travelRuleAuditReportJob";
 import { runRedisKeyExpirationMonitorJob } from "./redisKeyExpirationJob";
-import { runTrustlineMonitorJob } from "./trustlineMonitorJob";
-import { runPaymentLinkExpirationJob } from "./paymentLinkExpirationJob";
+import { runIdempotencyCleanupJob } from "./idempotencyCleanupJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
 interface JobConfig {
@@ -119,6 +119,13 @@ const JOBS: JobConfig[] = [
     handler: runProviderHealthCheckJob,
   },
   {
+    name: "provider-token-watchdog",
+    // Every 5 minutes - detects expired/revoked provider credentials and dead
+    // or stale accounting OAuth tokens before they interrupt service
+    schedule: process.env.PROVIDER_TOKEN_WATCHDOG_CRON || "*/5 * * * *",
+    handler: runProviderTokenWatchdogJob,
+  },
+  {
     name: "provider-reconciliation",
     // Daily at 4:00 AM - runs automated reconciliation against provider CSV reports
     schedule: process.env.PROVIDER_RECONCILIATION_CRON || "0 4 * * *",
@@ -180,16 +187,10 @@ const JOBS: JobConfig[] = [
     handler: runRedisKeyExpirationMonitorJob,
   },
   {
-    name: "trustline-monitor",
-    // Every 10 minutes - verifies hot wallet trustlines and restores missing ones
-    schedule: process.env.TRUSTLINE_MONITOR_CRON || "*/10 * * * *",
-    handler: runTrustlineMonitorJob,
-  },
-  {
-    name: "payment-link-expiration",
-    // Every hour - checks for expiring/expired payment links and sends notifications
-    schedule: process.env.PAYMENT_LINK_EXPIRATION_CRON || "0 * * * *",
-    handler: runPaymentLinkExpirationJob,
+    name: "idempotency-cleanup",
+    // Daily at 3:00 AM - purges expired idempotency keys in batches
+    schedule: process.env.IDEMPOTENCY_CLEANUP_CRON || "0 3 * * *",
+    handler: runIdempotencyCleanupJob,
   },
 ];
 

@@ -170,6 +170,12 @@ export const dbReplicaReadEnabled = new Gauge({
   registers: [register],
 });
 
+export const dbReplicaFailoversTotal = new Counter({
+  name: "db_replica_failovers_total",
+  help: "Total number of read query failovers from replica to primary",
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics
@@ -338,54 +344,33 @@ export const transactionClassifierTrainingSamples = new Gauge({
   registers: [register],
 });
 
-// Trustline Monitoring Metrics
-export const trustlineChecksTotal = new Counter({
-  name: "trustline_checks_total",
-  help: "Total number of trustline checks performed",
-  labelNames: ["asset_code", "has_trustline"],
+// Webhook Retry Metrics
+export const webhookRetryAttemptsTotal = new Counter({
+  name: "webhook_retry_attempts_total",
+  help: "Total number of webhook retry attempts",
+  labelNames: ["event_type", "attempt", "status_code"],
   registers: [register],
 });
 
-export const trustlineRestorationsTotal = new Counter({
-  name: "trustline_restorations_total",
-  help: "Total number of trustline restoration attempts",
-  labelNames: ["asset_code", "status"],
+export const webhookDeliveryDurationSeconds = new Histogram({
+  name: "webhook_delivery_duration_seconds",
+  help: "Duration of webhook delivery attempts in seconds",
+  labelNames: ["event_type", "status"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30],
   registers: [register],
 });
 
-export const trustlineAlertsTotal = new Counter({
-  name: "trustline_alerts_total",
-  help: "Total number of missing trustline alerts sent",
-  labelNames: ["asset_code"],
+export const webhookDeliveryRetriesTotal = new Counter({
+  name: "webhook_delivery_retries_total",
+  help: "Total number of webhook deliveries that required retries",
+  labelNames: ["event_type", "final_status"],
   registers: [register],
 });
 
-// Adaptive Rate Limiting Metrics
-export const adaptiveRateLimitAdjustmentsTotal = new Counter({
-  name: "adaptive_rate_limit_adjustments_total",
-  help: "Total number of adaptive rate limit adjustments",
-  labelNames: ["provider", "direction"],
-  registers: [register],
-});
-
-export const adaptiveRateLimitCurrentCapacity = new Gauge({
-  name: "adaptive_rate_limit_current_capacity",
-  help: "Current token bucket capacity for each provider",
-  labelNames: ["provider"],
-  registers: [register],
-});
-
-export const rateLimitViolationsTotal = new Counter({
-  name: "rate_limit_violations_total",
-  help: "Total number of rate limit violations detected from provider responses",
-  labelNames: ["provider", "status_code"],
-  registers: [register],
-});
-
-// Payment Link Expiration Metrics
-export const paymentLinkExpirationNotificationsTotal = new Counter({
-  name: "payment_link_expiration_notifications_total",
-  help: "Total number of payment link expiration notifications sent",
-  labelNames: ["notification_type"],
+export const webhookBackoffDelaySeconds = new Histogram({
+  name: "webhook_backoff_delay_seconds",
+  help: "Backoff delay applied between webhook retry attempts in seconds",
+  labelNames: ["event_type", "attempt"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
   registers: [register],
 });

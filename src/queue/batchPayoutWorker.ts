@@ -12,6 +12,7 @@ import {
   batchPayoutDurationSeconds,
   batchPayoutSize,
 } from "../utils/metrics";
+import { ParallelBatchProcessor, BatchItem } from "../services/parallelBatchProcessor";
 
 const transactionModel = new TransactionModel();
 const mobileMoneyService = new MobileMoneyService();
@@ -24,6 +25,10 @@ const pushService = pushNotificationService;
 const BATCH_SIZE = 100;
 const BATCH_INTERVAL_MS = parseInt(process.env.BATCH_PAYOUT_INTERVAL_MS || "5000", 10);
 const SUPPORTED_PROVIDERS = ["mtn"];
+const PARALLEL_CONCURRENCY = parseInt(process.env.BATCH_PAYOUT_CONCURRENCY || "5", 10);
+const RATE_LIMIT_PER_SECOND = parseInt(process.env.BATCH_PAYOUT_RATE_LIMIT || "50", 10);
+const CIRCUIT_BREAKER_THRESHOLD = parseInt(process.env.BATCH_PAYOUT_CB_THRESHOLD || "10", 10);
+const CIRCUIT_BREAKER_RESET_MS = parseInt(process.env.BATCH_PAYOUT_CB_RESET_MS || "60000", 10);
 
 interface PendingPayout {
   transactionId: string;
@@ -152,6 +157,94 @@ async function fetchPendingPayouts(provider: string): Promise<PendingPayout[]> {
 }
 
 /**
+ * Process a single payout result item
+ */
+async function processSinglePayoutResult(
+  payout: PendingPayout,
+  result: BatchPayoutResult | undefined,
+): Promise<void> {
+  if (!result) {
+    console.error(`[${payout.transactionId}] No result returned from batch`);
+    await transactionModel.updateStatus(
+      payout.transactionId,
+      TransactionStatus.Failed,
+    );
+    await transactionModel.patchMetadata(payout.transactionId, {
+      batchError: "No result returned from batch processing",
+    });
+    return;
+  }
+
+  if (result.success) {
+    await transactionModel.updateStatus(
+      payout.transactionId,
+      TransactionStatus.Completed,
+    );
+
+    if (result.providerReference) {
+      await transactionModel.patchMetadata(payout.transactionId, {
+        providerReference: result.providerReference,
+      });
+    }
+
+    await notifyTransactionWebhook(payout.transactionId, "transaction.completed", {
+      transactionModel,
+      webhookService,
+    });
+    await sendTransactionEmail(payout.transactionId);
+    await sendTransactionPush(payout.transactionId, "completed");
+    await sendTxnSms(
+      payout.transactionId,
+      payout.phoneNumber,
+      payout.amount,
+      payout.provider,
+      "transaction_completed",
+    );
+
+    await rabbitMQManager.publish(
+      EXCHANGES.TRANSACTIONS,
+      ROUTING_KEYS.TRANSACTION_COMPLETED,
+      { transactionId: payout.transactionId, status: "completed" },
+    );
+
+    console.log(`[${payout.transactionId}] Batch payout completed successfully`);
+  } else {
+    const errorMsg = result.error || "Batch payout failed";
+    
+    await transactionModel.updateStatus(
+      payout.transactionId,
+      TransactionStatus.Failed,
+    );
+    await transactionModel.patchMetadata(payout.transactionId, {
+      batchError: errorMsg,
+    });
+
+    await notifyTransactionWebhook(payout.transactionId, "transaction.failed", {
+      transactionModel,
+      webhookService,
+    });
+    await sendFailureEmail(payout.transactionId, errorMsg);
+    await sendTransactionPush(payout.transactionId, "failed", errorMsg);
+    await sendTxnSms(
+      payout.transactionId,
+      payout.phoneNumber,
+      payout.amount,
+      payout.provider,
+      "transaction_failed",
+      errorMsg,
+    );
+
+    await rabbitMQManager.publish(
+      EXCHANGES.TRANSACTIONS,
+      ROUTING_KEYS.TRANSACTION_FAILED,
+      { transactionId: payout.transactionId, status: "failed", error: errorMsg },
+    );
+
+    console.log(`[${payout.transactionId}] Batch payout failed: ${errorMsg}`);
+  }
+}
+
+/**
  * Process batch payout results and update individual transactions
  */
 async function processBatchResults(
@@ -160,89 +253,35 @@ async function processBatchResults(
 ): Promise<void> {
   const resultMap = new Map(results.map(r => [r.referenceId, r]));
 
-  for (const payout of payouts) {
+  const processor = new ParallelBatchProcessor({
+    concurrency: PARALLEL_CONCURRENCY,
+    rateLimitPerSecond: RATE_LIMIT_PER_SECOND,
+    circuitBreakerThreshold: CIRCUIT_BREAKER_THRESHOLD,
+    circuitBreakerResetMs: CIRCUIT_BREAKER_RESET_MS,
+    maxRetries: 2,
+  });
+
+  const batchItems: BatchItem<PendingPayout>[] = payouts.map(p => ({
+    id: p.transactionId,
+    payload: p,
+  }));
+
+  const summary = await processor.processBatch(batchItems, async (item) => {
+    const payout = item.payload;
     const result = resultMap.get(payout.transactionId);
+    await processSinglePayoutResult(payout, result);
+    return { transactionId: payout.transactionId };
+  });
 
-    if (!result) {
-      console.error(`[${payout.transactionId}] No result returned from batch`);
-      await transactionModel.updateStatus(
-        payout.transactionId,
-        TransactionStatus.Failed,
-      );
-      await transactionModel.patchMetadata(payout.transactionId, {
-        batchError: "No result returned from batch processing",
-      });
-      continue;
-    }
-
-    if (result.success) {
-      await transactionModel.updateStatus(
-        payout.transactionId,
-        TransactionStatus.Completed,
-      );
-
-      if (result.providerReference) {
-        await transactionModel.patchMetadata(payout.transactionId, {
-          providerReference: result.providerReference,
-        });
-      }
-
-      await notifyTransactionWebhook(payout.transactionId, "transaction.completed", {
-        transactionModel,
-        webhookService,
-      });
-      await sendTransactionEmail(payout.transactionId);
-      await sendTransactionPush(payout.transactionId, "completed");
-      await sendTxnSms(
-        payout.transactionId,
-        payout.phoneNumber,
-        payout.amount,
-        payout.provider,
-        "transaction_completed",
-      );
-
-      await rabbitMQManager.publish(
-        EXCHANGES.TRANSACTIONS,
-        ROUTING_KEYS.TRANSACTION_COMPLETED,
-        { transactionId: payout.transactionId, status: "completed" },
-      );
-
-      console.log(`[${payout.transactionId}] Batch payout completed successfully`);
-    } else {
-      const errorMsg = result.error || "Batch payout failed";
-      
-      await transactionModel.updateStatus(
-        payout.transactionId,
-        TransactionStatus.Failed,
-      );
-      await transactionModel.patchMetadata(payout.transactionId, {
-        batchError: errorMsg,
-      });
-
-      await notifyTransactionWebhook(payout.transactionId, "transaction.failed", {
-        transactionModel,
-        webhookService,
-      });
-      await sendFailureEmail(payout.transactionId, errorMsg);
-      await sendTransactionPush(payout.transactionId, "failed", errorMsg);
-      await sendTxnSms(
-        payout.transactionId,
-        payout.phoneNumber,
-        payout.amount,
-        payout.provider,
-        "transaction_failed",
-        errorMsg,
-      );
-
-      await rabbitMQManager.publish(
-        EXCHANGES.TRANSACTIONS,
-        ROUTING_KEYS.TRANSACTION_FAILED,
-        { transactionId: payout.transactionId, status: "failed", error: errorMsg },
-      );
-
-      console.log(`[${payout.transactionId}] Batch payout failed: ${errorMsg}`);
-    }
+  if (summary.circuitBreakerTripped) {
+    console.error(
+      `[BatchPayoutWorker] Circuit breaker tripped: ${summary.failed} failures in batch processing`,
+    );
   }
+
+  console.log(
+    `[BatchPayoutWorker] Parallel processing completed: ${summary.succeeded}/${summary.total} succeeded, ${summary.failed} failed in ${summary.totalDurationMs}ms`,
+  );
 }
 
 /**
