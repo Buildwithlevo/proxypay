@@ -374,3 +374,11 @@ export const webhookBackoffDelaySeconds = new Histogram({
   buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
   registers: [register],
 });
+
+// Deprecated API Endpoint Usage Metrics (#393)
+export const deprecatedEndpointRequestsTotal = new Counter({
+  name: "deprecated_endpoint_requests_total",
+  help: "Total number of requests to deprecated API endpoints",
+  labelNames: ["method", "route", "replacement", "sunset"],
+  registers: [register],
+});

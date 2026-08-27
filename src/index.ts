@@ -19,6 +19,9 @@ import {
   validateVersionMiddleware,
   VersionedRequest,
 } from "./middleware/apiVersion";
+import { deprecationMiddleware } from "./middleware/deprecation";
+import { seedDeprecations } from "./middleware/deprecationSeed";
+import { adminDeprecationRoutes } from "./routes/admin/deprecations";
 import {
   bulkRoutesV1,
   disputeRoutesV1,
@@ -431,6 +434,8 @@ app.use(haltOnTimedout);
 
 app.use(apiVersionMiddleware);
 app.use(validateVersionMiddleware);
+// #393 – Add Deprecation / Sunset / Link headers to registered legacy endpoints
+app.use(deprecationMiddleware);
 app.use("/oauth", createOAuthRouter());
 app.use("/api/auth", authRoutes);
 
@@ -500,6 +505,8 @@ app.use("/api/admin", requireAuth, adminRoutes);
 app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
 // #405 – Provider Health Dashboard
 app.use("/api/admin/providers/health", requireAuth, providerHealthRouter);
+// #393 – Deprecation timeline & usage monitoring
+app.use("/api/admin/deprecations", requireAuth, adminDeprecationRoutes);
 app.use("/api/admin/kyc-upgrades", requireAuth, kycTierUpgradeRoutes);
 app.use("/api/admin/analytics", requireAuth, analyticsRouter);
 app.use("/api/admin/auth", createAdminSep10Router());
@@ -653,6 +660,9 @@ async function initializeRuntime(): Promise<void> {
   if (process.env.NODE_ENV === "test") {
     return;
   }
+
+  // #393 – Populate the deprecation registry with legacy endpoint notices.
+  seedDeprecations();
 
   // Initialize background jobs and monitoring
   const { startJobs } = await import("./jobs/scheduler.js");
