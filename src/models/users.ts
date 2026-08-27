@@ -84,7 +84,7 @@ export class UserModel {
     const row = result.rows[0];
     const AUTHORIZED_ROLES = ["admin", "super-admin", "compliance_officer"];
     const isAuthorized = requester && (
-      AUTHORIZED_ROLES.includes(requester.role) || 
+      AUTHORIZED_ROLES.includes(requester.role) ||
       requester.id === id
     );
 
@@ -99,6 +99,8 @@ export class UserModel {
       backup_codes: row.backup_codes ?? null,
       status: row.status,
       tokenVersion: row.token_version ?? 0,
+      isActive: row.is_active ?? true,
+      deactivatedAt: row.deactivated_at ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       smsOptOut: row.sms_opt_out ?? false,
@@ -170,44 +172,44 @@ export class UserModel {
 
   async updateStatus(
     id: string,
-    status: 'active' | 'frozen' | 'suspended',
+    status: UserStatus,
     changedBy: string,
     reason?: string,
     ipAddress?: string,
     userAgent?: string
   ): Promise<User | null> {
     const client = await pool.connect();
-    
+
     try {
       await client.query('BEGIN');
-      
+
       // Get current user status for audit
       const currentUser = await this.findById(id);
       if (!currentUser) {
         await client.query('ROLLBACK');
         return null;
       }
-      
+
       // Update user status
       const updateQuery = "UPDATE users SET status = $1 WHERE id = $2 RETURNING *";
       const result = await client.query(updateQuery, [status, id]);
-      
+
       if (result.rows.length === 0) {
         await client.query('ROLLBACK');
         return null;
       }
-      
+
       // Log audit entry
       const auditQuery = `
         INSERT INTO user_status_audit (
           user_id, action, old_status, new_status, reason, changed_by, ip_address, user_agent
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       `;
-      
-      const action = status === 'frozen' ? 'FREEZE' : 
-                     status === 'suspended' ? 'SUSPEND' : 
-                     currentUser.status === 'frozen' ? 'UNFREEZE' : 'UNSUSPEND';
-      
+
+      const action = status === UserStatus.FROZEN ? 'FREEZE' :
+                     status === UserStatus.SUSPENDED ? 'SUSPEND' :
+                     currentUser.status === UserStatus.FROZEN ? 'UNFREEZE' : 'UNSUSPEND';
+
       await client.query(auditQuery, [
         id,
         action,
@@ -218,9 +220,9 @@ export class UserModel {
         ipAddress,
         userAgent
       ]);
-      
+
       await client.query('COMMIT');
-      
+
       // Return updated user
       const row = result.rows[0];
       return {
@@ -233,6 +235,8 @@ export class UserModel {
         two_factor_secret: decrypt(row.two_factor_secret) ?? null,
         backup_codes: row.backup_codes ?? null,
         status: row.status,
+        isActive: row.is_active ?? true,
+        deactivatedAt: row.deactivated_at ?? null,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         smsOptOut: row.sms_opt_out ?? false,
@@ -248,7 +252,7 @@ export class UserModel {
 
   async getAuditHistory(userId: string): Promise<any[]> {
     const query = `
-      SELECT 
+      SELECT
         a.id,
         a.action,
         a.old_status AS "oldStatus",
@@ -269,9 +273,9 @@ export class UserModel {
   }
   async incrementTokenVersion(id: string): Promise<number> {
     const query = `
-      UPDATE users 
+      UPDATE users
       SET token_version = COALESCE(token_version, 0) + 1, updated_at = CURRENT_TIMESTAMP
-      WHERE id = $1 
+      WHERE id = $1
       RETURNING token_version
     `;
     const result = await queryWrite(query, [id]);
@@ -283,5 +287,34 @@ export class UserModel {
       "UPDATE users SET mandatory_2fa_withdrawals = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
       [enabled, id]
     );
+  }
+
+  async deactivate(id: string, deactivatedBy?: string): Promise<void> {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE users
+         SET is_active = false,
+             deactivated_at = CURRENT_TIMESTAMP,
+             status = 'suspended',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [id],
+      );
+      if (deactivatedBy) {
+        await client.query(
+          `INSERT INTO user_status_audit (user_id, action, new_status, changed_by)
+           VALUES ($1, 'DEACTIVATE', 'suspended', $2)`,
+          [id, deactivatedBy],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
