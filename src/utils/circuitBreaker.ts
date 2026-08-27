@@ -43,8 +43,9 @@ function getCircuitKey(provider: string, operation: string): string {
   return `${provider}:${operation}`;
 }
 
+import { providerSettingsService } from "../services/providerSettingsService";
+
 async function getBreakerOptions(name: string, provider: string): Promise<CircuitBreakerOptions> {
-  const { providerSettingsService } = await import("../services/providerSettingsService.js");
   const settings = await providerSettingsService.getProviderSettings(provider);
 
   const timeoutMs = settings ? settings.timeout_ms : Number(process.env.PROVIDER_CIRCUIT_BREAKER_TIMEOUT_MS ?? 5_000);
