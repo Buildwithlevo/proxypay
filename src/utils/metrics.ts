@@ -170,6 +170,12 @@ export const dbReplicaReadEnabled = new Gauge({
   registers: [register],
 });
 
+export const dbReplicaFailoversTotal = new Counter({
+  name: "db_replica_failovers_total",
+  help: "Total number of read query failovers from replica to primary",
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics
@@ -335,5 +341,36 @@ export const transactionClassifierFeedbackTotal = new Counter({
 export const transactionClassifierTrainingSamples = new Gauge({
   name: "transaction_classifier_training_samples",
   help: "Number of labelled training samples stored for the transaction classifier",
+  registers: [register],
+});
+
+// Webhook Retry Metrics
+export const webhookRetryAttemptsTotal = new Counter({
+  name: "webhook_retry_attempts_total",
+  help: "Total number of webhook retry attempts",
+  labelNames: ["event_type", "attempt", "status_code"],
+  registers: [register],
+});
+
+export const webhookDeliveryDurationSeconds = new Histogram({
+  name: "webhook_delivery_duration_seconds",
+  help: "Duration of webhook delivery attempts in seconds",
+  labelNames: ["event_type", "status"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30],
+  registers: [register],
+});
+
+export const webhookDeliveryRetriesTotal = new Counter({
+  name: "webhook_delivery_retries_total",
+  help: "Total number of webhook deliveries that required retries",
+  labelNames: ["event_type", "final_status"],
+  registers: [register],
+});
+
+export const webhookBackoffDelaySeconds = new Histogram({
+  name: "webhook_backoff_delay_seconds",
+  help: "Backoff delay applied between webhook retry attempts in seconds",
+  labelNames: ["event_type", "attempt"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
   registers: [register],
 });

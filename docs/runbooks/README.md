@@ -28,21 +28,21 @@ diagnosis → mitigation → recovery → post-incident.
 
 ---
 
-## Incident catalogue (top 11)
+## Incident catalogue (top 10)
 
-| #   | Runbook                                                             | Trigger / alert                                               | Sev   |
-| --- | ------------------------------------------------------------------- | ------------------------------------------------------------- | ----- |
-| 01  | [Mobile money provider down](./01-provider-down.md)                 | `provider_circuit_breaker_state=1`, payout failures           | P2    |
-| 02  | [Database index bloat & slow queries](./02-database-index-bloat.md) | Rising query latency, `slow_query` logs                       | P3    |
-| 03  | [High API latency](./03-high-api-latency.md)                        | P99 `http_request_duration_seconds` breach                    | P2    |
-| 04  | [Queue backlog](./04-queue-backlog.md)                              | `total_depth` high, KEDA at max replicas                      | P2    |
-| 05  | [Redis outage / failover](./05-redis-outage.md)                     | `/ready` shows `redis: down`, session/cache errors            | P1    |
-| 06  | [Stellar Horizon degradation](./06-stellar-horizon-degraded.md)     | `horizon_node_health=0`, `horizon_node_failures_total` rising | P2    |
-| 07  | [Database connection pool exhaustion](./07-db-pool-exhaustion.md)   | `too many clients`, timeouts on `/ready` DB check             | P1    |
-| 08  | [Read-replica lag](./08-replica-lag.md)                             | `db_replica_lag_seconds` high, stale reads                    | P3    |
-| 09  | [Ledger imbalance](./09-ledger-imbalance.md)                        | `reconcile:ledger` reports debits ≠ credits                   | P1    |
-| 10  | [Elevated error rate](./10-elevated-error-rate.md)                  | Error-rate alert, `transaction_errors_total` spike            | P2    |
-| 11  | [Database migration failure](./11-migration-failure.md)             | Deploy fails at `migrate:up`, `Migration runner error`        | P1/P2 |
+| # | Runbook | Trigger / alert | Sev |
+|---|---------|-----------------|-----|
+| 01 | [Mobile money provider down](./01-provider-down.md) | `provider_circuit_breaker_state=1`, payout failures | P2 |
+| 02 | [Database index bloat & slow queries](./02-database-index-bloat.md) | Rising query latency, `slow_query` logs | P3 |
+| 03 | [High API latency](./03-high-api-latency.md) | P99 `http_request_duration_seconds` breach | P2 |
+| 04 | [Queue backlog](./04-queue-backlog.md) | `total_depth` high, KEDA at max replicas | P2 |
+| 05 | [Redis outage / failover](./05-redis-outage.md) | `/ready` shows `redis: down`, session/cache errors | P1 |
+| 06 | [Stellar Horizon degradation](./06-stellar-horizon-degraded.md) | `horizon_node_health=0`, `horizon_node_failures_total` rising | P2 |
+| 07 | [Database connection pool exhaustion](./07-db-pool-exhaustion.md) | `too many clients`, timeouts on `/ready` DB check | P1 |
+| 08 | [Read-replica lag](./08-replica-lag.md) | `db_replica_lag_seconds` high, stale reads | P3 |
+| 09 | [Ledger imbalance](./09-ledger-imbalance.md) | `reconcile:ledger` reports debits ≠ credits | P1 |
+| 10 | [Elevated error rate](./10-elevated-error-rate.md) | Error-rate alert, `transaction_errors_total` spike | P2 |
+| 11 | [Cross-region database failover](./11-database-failover.md) | `db_dr_mode=1`, `/ready` DB down, region outage | P1 |
 
 ---
 
