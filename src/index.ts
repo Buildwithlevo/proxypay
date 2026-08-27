@@ -507,6 +507,8 @@ app.use("/api/admin/auth", createAdminSep10Router());
 app.use("/api/kyc/webhooks", kycWebhookRouter);
 // #403 – Transaction Metadata Search
 app.use("/api/transactions/metadata", transactionMetadataRouter);
+// #404 – Fraud Detection Logging
+app.use("/api/fraud", fraudRoutes);
 // #404 – 2FA Multi-method
 app.use("/api/auth/2fa", twoFactorRouter);
 // #358 – Provider Health Aggregation
