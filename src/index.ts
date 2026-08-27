@@ -49,8 +49,9 @@ import {
   SESSION_TTL_SECONDS,
 } from "./config/redis";
 import { rateLimitMiddleware } from "./middleware/rateLimitRedis";
+import rateLimitDefaultMiddleware from "./middleware/rateLimit";
 import { createOAuthRouter } from "./auth/oauth";
-import { pool } from "./config/database";
+import { getReplicationStatus, pool } from "./config/database";
 import {
   globalTimeout,
   haltOnTimedout,
@@ -66,8 +67,15 @@ import { i18nMiddleware } from "./utils/i18n";
 import { metricsMiddleware } from "./middleware/metrics";
 import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
 import { sessionAnomalyLogger } from "./services/logger";
-import { HealthCheckResponse, ReadinessCheckResponse, ProviderHealthSummary } from "./types/api";
-import { checkMobileMoneyHealth, ProviderName } from "./services/mobilemoney/providers/healthCheck";
+import {
+  HealthCheckResponse,
+  ReadinessCheckResponse,
+  ProviderHealthSummary,
+} from "./types/api";
+import {
+  checkMobileMoneyHealth,
+  ProviderName,
+} from "./services/mobilemoney/providers/healthCheck";
 import { privacyRoutes } from "./routes/privacy";
 import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
@@ -97,10 +105,15 @@ import providerStatusRouter from "./routes/providerStatus";
 import providerHealthRouter from "./routes/providerHealthRoutes";
 import kycWebhookRouter from "./routes/kycWebhookRoutes";
 import twoFactorRouter from "./routes/twoFactorRoutes";
-import { transactionMetadataRouter } from "./routes/transactionMetadataRoutes";
+import transactionMetadataRouter from "./routes/transactionMetadataRoutes";
+import healthProvidersRouter from "./routes/healthProviders";
+import adminReplicasRouter from "./routes/adminReplicas";
+import connectionDashboardRouter from "./routes/connectionDashboard";
 import { transactionStreamRoutes } from "./routes/stream";
-import { fraudRoutes } from "./routes/fraud";
-import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
+import {
+  startHeartbeatService,
+  stopHeartbeatService,
+} from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
 
 // Sentry Middleware
@@ -109,6 +122,7 @@ import { WebSocketManager } from "./websocket";
 import { layeredCache } from "./services/layeredCache";
 import { ERROR_CODES } from "./constants/errorCodes";
 import { startApolloServer } from "./graphql/server";
+import { RequestTracker } from "./utils/requestTracker";
 
 dotenv.config();
 
@@ -128,7 +142,24 @@ const SHUTDOWN_TIMEOUT_MS = parseInt(
 let server: Server | null = null;
 let isShuttingDown = false;
 let shutdownInProgress = false;
-let activeRequests = 0;
+const requestTracker = new RequestTracker();
+
+// Track every accepted request before parsing or application middleware runs so
+// shutdown cannot close dependencies while a request is still being handled.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (isShuttingDown) {
+    res.setHeader("Connection", "close");
+    throw createError(ERROR_CODES.SERVICE_UNAVAILABLE, "Service Unavailable", {
+      error: "Service Unavailable",
+      message: "Server is shutting down. Please retry shortly.",
+    });
+  }
+
+  const releaseRequest = requestTracker.start();
+  res.once("finish", releaseRequest);
+  res.once("close", releaseRequest);
+  next();
+});
 
 if (process.env.SENTRY_DSN) {
   Sentry.setupExpressErrorHandler(app);
@@ -183,38 +214,12 @@ app.use(
     extended: true,
   }),
 );
-// app.use(rateLimitMiddleware);
+app.use(rateLimitDefaultMiddleware);
 app.use(responseTime);
 app.use(requestId);
 app.use(readReplicaRoutingMiddleware);
 app.use(i18nMiddleware);
 app.use(dbConnectionLeakDetector);
-
-app.use((req: Request, res: Response, next: NextFunction) => {
-  if (isShuttingDown) {
-    res.setHeader("Connection", "close");
-    throw createError(ERROR_CODES.SERVICE_UNAVAILABLE, "Service Unavailable", {
-      error: "Service Unavailable",
-      message: "Server is shutting down. Please retry shortly.",
-    });
-  }
-
-  activeRequests += 1;
-  let completed = false;
-
-  const onRequestFinished = () => {
-    if (completed) {
-      return;
-    }
-    completed = true;
-    activeRequests = Math.max(0, activeRequests - 1);
-  };
-
-  res.on("finish", onRequestFinished);
-  res.on("close", onRequestFinished);
-
-  next();
-});
 
 const sessionSecret =
   process.env.SESSION_SECRET || "default-secret-change-in-production";
@@ -243,19 +248,19 @@ async function getProviderHealthSummary(): Promise<ProviderHealthSummary> {
     const healthResult = await checkMobileMoneyHealth();
     const providers = healthResult.providers;
     const providerNames = Object.keys(providers) as ProviderName[];
-    
+
     const providerStatus: Record<string, "up" | "down" | "unknown"> = {};
     let healthyCount = 0;
-    
+
     for (const name of providerNames) {
       const status = providers[name]?.status ?? "unknown";
       providerStatus[name] = status;
       if (status === "up") healthyCount++;
     }
-    
+
     const totalCount = providerNames.length;
     let overall: "healthy" | "degraded" | "down";
-    
+
     if (healthyCount === totalCount) {
       overall = "healthy";
     } else if (healthyCount > 0) {
@@ -263,7 +268,7 @@ async function getProviderHealthSummary(): Promise<ProviderHealthSummary> {
     } else {
       overall = "down";
     }
-    
+
     return {
       overall,
       providers: providerStatus,
@@ -323,6 +328,19 @@ app.get("/ready", async (_req: Request, res: Response) => {
   } catch (err) {
     console.error("Redis check failed", err);
     allReady = false;
+  }
+
+  // Replication status is informational: a lagging or down replica degrades
+  // the replication check but reads fall back to the primary, so it does not
+  // flip the pod to not-ready (that would defeat DR redundancy).
+  try {
+    const replication = await getReplicationStatus();
+    checks.replication = replication.status;
+    checks.dr_mode = replication.drMode;
+  } catch (err) {
+    console.error("Replication check failed", err);
+    checks.replication = "unknown";
+    checks.dr_mode = "standby";
   }
 
   const body: ReadinessCheckResponse = {
@@ -493,6 +511,12 @@ app.use("/api/transactions/metadata", transactionMetadataRouter);
 app.use("/api/fraud", fraudRoutes);
 // #404 – 2FA Multi-method
 app.use("/api/auth/2fa", twoFactorRouter);
+// #358 – Provider Health Aggregation
+app.use("/api/health", healthProvidersRouter);
+// #356 – Read Replica Health Admin
+app.use("/api/admin/replicas", requireAuth, adminReplicasRouter);
+// #355 – Connection Pool Dashboard
+app.use("/api/admin/connections", requireAuth, connectionDashboardRouter);
 app.use("/sep10", createSep10Router());
 app.use("/sep31", sep31Router);
 app.use("/sep24", sep24Router);
@@ -536,22 +560,6 @@ if (process.env.SENTRY_DSN) {
 app.use(timeoutErrorHandler);
 app.use(errorHandler);
 
-function waitForActiveRequests(timeoutMs: number): Promise<void> {
-  if (activeRequests === 0) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve) => {
-    const startedAt = Date.now();
-    const interval = setInterval(() => {
-      if (activeRequests === 0 || Date.now() - startedAt >= timeoutMs) {
-        clearInterval(interval);
-        resolve();
-      }
-    }, 100);
-  });
-}
-
 async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
   if (shutdownInProgress) {
     console.log(`[Shutdown] ${signal} received; shutdown already in progress`);
@@ -567,31 +575,41 @@ async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
       console.log(
         "[Shutdown] Stopping HTTP server from accepting new requests",
       );
-      await new Promise<void>((resolve, reject) => {
-        server?.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
+      // Initiate listener closure before cleaning up dependencies so no new
+      // work can enter while the existing requests drain.
+      server.close((error) => {
+        if (
+          error &&
+          (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING"
+        ) {
+          console.error("[Shutdown] HTTP listener close failed", error);
+          return;
+        }
+        console.log("[Shutdown] HTTP listener closed");
       });
-      console.log("[Shutdown] HTTP listener closed");
     }
 
-    const pendingAtStart = activeRequests;
+    if (wsManager) {
+      console.log("[Shutdown] Closing WebSocket connections");
+      await wsManager.close();
+      wsManager = null;
+      console.log("[Shutdown] WebSocket connections closed");
+    }
+
+    const pendingAtStart = requestTracker.activeCount;
     if (pendingAtStart > 0) {
       console.log(
         `[Shutdown] Waiting for ${pendingAtStart} active request(s) to finish (timeout ${SHUTDOWN_TIMEOUT_MS}ms)`,
       );
     }
 
-    await waitForActiveRequests(SHUTDOWN_TIMEOUT_MS);
+    await requestTracker.waitForZero(SHUTDOWN_TIMEOUT_MS);
 
-    if (activeRequests > 0) {
+    if (requestTracker.activeCount > 0) {
       console.warn(
-        `[Shutdown] Timed out waiting for active requests. Remaining: ${activeRequests}`,
+        `[Shutdown] Timed out waiting for active requests. Remaining: ${requestTracker.activeCount}`,
       );
+      server?.closeAllConnections?.();
     } else {
       console.log("[Shutdown] All active requests finished");
     }
@@ -640,6 +658,14 @@ async function initializeRuntime(): Promise<void> {
   const { startJobs } = await import("./jobs/scheduler.js");
   startJobs();
 
+  // #356 – Start replica health monitoring loop
+  const { startReplicaHealthMonitoring } = await import("./middleware/readReplicaRouting.js");
+  startReplicaHealthMonitoring();
+
+  // #355 – Start long-running transaction monitor
+  const { startLongRunningTransactionMonitor } = await import("./middleware/transactionLeakDetector.js");
+  startLongRunningTransactionMonitor();
+
   // Initialize Prometheus Horizon Scraper
   startStellarExporter();
 
@@ -668,7 +694,8 @@ async function initializeRuntime(): Promise<void> {
     await layeredCache.init();
     console.log("Layered cache (L1/L2) initialized");
 
-    const { providerSettingsService } = await import("./services/providerSettingsService.js");
+    const { providerSettingsService } =
+      await import("./services/providerSettingsService.js");
     await providerSettingsService.getAllSettings();
     console.log("Provider settings cache initialized");
 

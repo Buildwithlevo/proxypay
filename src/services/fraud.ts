@@ -2,6 +2,7 @@ import { transactionTotal, transactionErrorsTotal } from '../utils/metrics';
 import { Transaction, TransactionStatus } from '../models/transaction';
 import { TransactionModel } from '../models/transaction';
 import { UserModel } from '../models/users';
+import { FraudAlertModel, FraudRiskLevel, FraudRecommendedAction } from '../models/fraudAlert';
 import { redisClient } from '../config/redis';
 import logger from '../utils/logger';
 import { fraudLoggingService } from './fraudLoggingService';
@@ -144,12 +145,14 @@ export class FraudService {
   private reviewQueue: FraudTransactionInput[] = [];
   private transactionModel: TransactionModel;
   private userModel: UserModel;
+  private fraudAlertModel: FraudAlertModel;
   private highRiskNumbers: Set<string> = new Set();
 
   constructor(config?: Partial<FraudConfig>) {
     this.config = { ...defaultConfig, ...config };
     this.transactionModel = new TransactionModel();
     this.userModel = new UserModel();
+    this.fraudAlertModel = new FraudAlertModel();
     this.loadHighRiskNumbers();
   }
 
@@ -638,14 +641,21 @@ export class FraudService {
   }
 
   /**
-   * Logs a fraud alert for a suspicious transaction
+   * Logs a fraud alert for a suspicious transaction and persists to database
    * @param result Fraud detection result
    * @param transactionInput The transaction input
+   * @param userContext Optional user context for enhanced logging
+   * @param durationMs Optional duration of the fraud detection analysis
    */
-  logFraudAlert(result: FraudResult, transactionInput: FraudTransactionInput): void {
+  async logFraudAlert(
+    result: FraudResult,
+    transactionInput: FraudTransactionInput,
+    userContext?: Record<string, unknown>,
+    durationMs?: number,
+  ): Promise<void> {
     if (!result.isFraud) return;
 
-    const alert = {
+    const alertData = {
       timestamp: new Date().toISOString(),
       level: 'WARN',
       type: 'FRAUD_ALERT',
@@ -660,7 +670,34 @@ export class FraudService {
       recommendedAction: result.recommendedAction,
     };
 
-    logger.warn(alert, 'Fraud alert generated');
+    logger.warn(alertData, 'Fraud alert generated');
+
+    // Persist to database for investigation and rule improvement
+    try {
+      await this.fraudAlertModel.create({
+        transactionId: transactionInput.id,
+        userId: transactionInput.userId || undefined,
+        score: result.score,
+        riskLevel: result.riskLevel as FraudRiskLevel,
+        recommendedAction: result.recommendedAction as FraudRecommendedAction,
+        reasons: result.reasons,
+        heuristicsTriggered: result.heuristicsTriggered,
+        heuristicDetails: {},
+        userContext: userContext || {},
+        durationMs,
+        transactionAmount: transactionInput.amount,
+        transactionType: transactionInput.type,
+        provider: transactionInput.provider,
+        phoneNumber: transactionInput.phoneNumber,
+      });
+      logger.info({
+        transactionId: transactionInput.id,
+        score: result.score,
+        riskLevel: result.riskLevel,
+      }, 'Fraud alert persisted to database');
+    } catch (error) {
+      logger.error({ err: error, transactionId: transactionInput.id }, 'Failed to persist fraud alert to database');
+    }
   }
 
   /**
@@ -694,9 +731,28 @@ export class FraudService {
    * @returns Fraud detection result
    */
   async processTransaction(transactionInput: FraudTransactionInput): Promise<FraudResult> {
+    const startTime = Date.now();
     const result = await this.detectFraud(transactionInput);
+    const durationMs = Date.now() - startTime;
 
-    this.logFraudAlert(result, transactionInput);
+    // Gather user context for enhanced logging
+    let userContext: Record<string, unknown> = {};
+    if (transactionInput.userId) {
+      try {
+        const user = await this.userModel.findById(transactionInput.userId);
+        if (user) {
+          userContext = {
+            kycLevel: user.kycLevel,
+            accountAge: user.createdAt ? Math.floor((Date.now() - new Date(user.createdAt).getTime()) / (24 * 60 * 60 * 1000)) : null,
+            phoneCount: user.phoneNumber ? 1 : 0,
+          };
+        }
+      } catch {
+        // User context is optional, don't fail on errors
+      }
+    }
+
+    await this.logFraudAlert(result, transactionInput, userContext, durationMs);
 
     // Log full evaluation context to database
     try {
@@ -734,6 +790,21 @@ export class FraudService {
     }
 
     return result;
+  }
+
+  /**
+   * Gets the fraud alert model for external access
+   * @returns FraudAlertModel instance
+   */
+  getFraudAlertModel(): FraudAlertModel {
+    return this.fraudAlertModel;
+  }
+
+  /**
+   * Gets the fraud alert model for external access (singleton)
+   */
+  static getAlertModel(): FraudAlertModel {
+    return new FraudAlertModel();
   }
 
   /**
