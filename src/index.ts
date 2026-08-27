@@ -106,6 +106,9 @@ import providerHealthRouter from "./routes/providerHealthRoutes";
 import kycWebhookRouter from "./routes/kycWebhookRoutes";
 import twoFactorRouter from "./routes/twoFactorRoutes";
 import transactionMetadataRouter from "./routes/transactionMetadataRoutes";
+import healthProvidersRouter from "./routes/healthProviders";
+import adminReplicasRouter from "./routes/adminReplicas";
+import connectionDashboardRouter from "./routes/connectionDashboard";
 import { transactionStreamRoutes } from "./routes/stream";
 import {
   startHeartbeatService,
@@ -493,6 +496,12 @@ app.use("/api/kyc/webhooks", kycWebhookRouter);
 app.use("/api/transactions/metadata", transactionMetadataRouter);
 // #404 – 2FA Multi-method
 app.use("/api/auth/2fa", twoFactorRouter);
+// #358 – Provider Health Aggregation
+app.use("/api/health", healthProvidersRouter);
+// #356 – Read Replica Health Admin
+app.use("/api/admin/replicas", requireAuth, adminReplicasRouter);
+// #355 – Connection Pool Dashboard
+app.use("/api/admin/connections", requireAuth, connectionDashboardRouter);
 app.use("/sep10", createSep10Router());
 app.use("/sep31", sep31Router);
 app.use("/sep24", sep24Router);
@@ -633,6 +642,14 @@ async function initializeRuntime(): Promise<void> {
   // Initialize background jobs and monitoring
   const { startJobs } = await import("./jobs/scheduler.js");
   startJobs();
+
+  // #356 – Start replica health monitoring loop
+  const { startReplicaHealthMonitoring } = await import("./middleware/readReplicaRouting.js");
+  startReplicaHealthMonitoring();
+
+  // #355 – Start long-running transaction monitor
+  const { startLongRunningTransactionMonitor } = await import("./middleware/transactionLeakDetector.js");
+  startLongRunningTransactionMonitor();
 
   // Initialize Prometheus Horizon Scraper
   startStellarExporter();

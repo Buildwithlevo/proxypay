@@ -296,9 +296,11 @@ async function refreshReplicaStatus(idx: number): Promise<void> {
     const result = await client.query<{ lag_seconds: number | null }>(query);
     lagSeconds = result.rows?.[0]?.lag_seconds ?? null;
     healthy = true;
+    markReplicaHealthy(url);
   } catch (error) {
     healthy = false;
     lagSeconds = null;
+    markReplicaUnhealthy(url, error instanceof Error ? error.message : String(error));
     console.warn(`Replica health check failed for ${url}:`, error);
   } finally {
     client?.release();
@@ -326,9 +328,8 @@ function startReplicaLagMonitor(): void {
 startReplicaLagMonitor();
 
 /**
- * Execute a read-only SQL query against a replica pool if available.
- * If the replica is unreachable (pool error or connection failure) the query
- * automatically falls over to the primary pool so callers are unaffected.
+ * Execute a read-only SQL query against a replica pool with retry and fallback.
+ * If the replica fails, retries with exponential backoff and falls back to primary.
  *
  * @param text   - The parameterised SQL query string
  * @param params - Optional query parameters
