@@ -10,6 +10,8 @@
 
 import { pool } from "../config/database";
 import { redisClient } from "../config/redis";
+import { Gauge } from "prom-client";
+import { register } from "../utils/metrics";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,6 +48,13 @@ export interface ProviderTrendPoint {
 export interface ProviderHealthDashboard {
   generatedAt: string;
   providers: ProviderRealTimeMetrics[];
+  systemHealth: SystemHealth;
+}
+
+export interface SystemHealth {
+  status: HealthStatus;
+  score: number;
+  criticalProvidersDown: string[];
 }
 
 export interface ProviderHistoricalTrends {
@@ -61,6 +70,22 @@ const AVAILABILITY_CRITICAL = 80;   // < 80 % → critical
 const AVAILABILITY_WARNING = 95;    // < 95 % → warning
 const RESPONSE_TIME_WARNING_MS = 5_000;
 const RESPONSE_TIME_CRITICAL_MS = 15_000;
+
+/**
+ * Provider weights for system-wide health scoring.
+ * Higher weight = more critical to overall system availability.
+ */
+const PROVIDER_WEIGHTS: Record<ProviderName, number> = {
+  mtn: 5,
+  airtel: 3,
+  orange: 2,
+};
+
+const systemHealthGauge = new Gauge({
+  name: "provider_system_health_score",
+  help: "Weighted system health score (0-100)",
+  registers: [register],
+});
 
 function toHealthStatus(availabilityPct: number | null): HealthStatus {
   if (availabilityPct === null) return "unknown";
@@ -189,9 +214,41 @@ export async function getProviderHealthDashboard(
     };
   });
 
-  const dashboard: ProviderHealthDashboard = { generatedAt, providers };
+  const dashboard: ProviderHealthDashboard = { generatedAt, providers, systemHealth: computeSystemHealth(providers) };
+  systemHealthGauge.set(dashboard.systemHealth.score);
   await cachedDashboardSet(dashboard);
   return dashboard;
+}
+
+function computeSystemHealth(providers: ProviderRealTimeMetrics[]): SystemHealth {
+  let totalWeight = 0;
+  let weightedScore = 0;
+  const criticalDown: string[] = [];
+
+  for (const p of providers) {
+    const weight = PROVIDER_WEIGHTS[p.provider] ?? 1;
+    totalWeight += weight;
+
+    if (p.status === "down") {
+      if (weight >= 4) criticalDown.push(p.provider);
+      // score contribution = 0
+    } else if (p.status === "degraded") {
+      weightedScore += weight * 50;
+    } else if (p.status === "healthy") {
+      weightedScore += weight * 100;
+    }
+    // "unknown" contributes 0
+  }
+
+  const score = totalWeight > 0 ? Math.round((weightedScore / totalWeight) * 100) / 100 : 0;
+  let status: HealthStatus = "healthy";
+  if (criticalDown.length > 0 || score < AVAILABILITY_CRITICAL) {
+    status = "down";
+  } else if (score < AVAILABILITY_WARNING) {
+    status = "degraded";
+  }
+
+  return { status, score, criticalProvidersDown: criticalDown };
 }
 
 function buildAlerts(

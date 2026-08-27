@@ -1,196 +1,85 @@
 import { pool } from "../config/database";
-import logger from "./logger";
 
-export type AuditEventCategory =
-  | "authentication"
-  | "authorization"
-  | "data_access"
-  | "data_modification"
-  | "pii_access"
-  | "account_lifecycle"
-  | "transaction"
-  | "compliance"
-  | "system"
-  | "admin_action";
-
-export type AuditEventSeverity = "low" | "medium" | "high" | "critical";
-
-export interface AuditEventOptions {
-  /** Category of the audit event for filtering and reporting. */
-  category?: AuditEventCategory;
-  /** Free-text description of what happened. Overrides `reason` if both set. */
-  action?: string;
-  /** Severity rating for alerting thresholds. */
-  severity?: AuditEventSeverity;
-  /** Structured key-value metadata attached to the event. */
-  metadata?: Record<string, unknown>;
-  /** IP address of the originating request. */
+/**
+ * Audit event metadata passed alongside the required userId and reason.
+ */
+export interface AuditEventMetadata {
+  /** HTTP request method (GET, POST, etc.) */
+  method?: string;
+  /** Full request path */
+  path?: string;
+  /** Client IP address */
   ipAddress?: string;
-  /** User-Agent string of the originating request. */
+  /** Client User-Agent header */
   userAgent?: string;
-  /** Specific resource type affected (e.g. "user", "transaction", "fee_strategy"). */
-  resourceType?: string;
-  /** ID of the specific resource affected. */
-  resourceId?: string;
-  /** ID of the admin/operator performing the action (when different from userId). */
-  performedBy?: string;
-  /** Success or failure of the operation. Defaults to true. */
-  success?: boolean;
-  /** Error message when success is false. */
-  errorMessage?: string;
+  /** Arbitrary structured data attached to the event */
+  extra?: Record<string, unknown>;
 }
 
 /**
- * Persist a structured audit event to the `audit_events` table and emit a
- * structured log line via the centralized Pino logger.
+ * Persist an audit event to the `audit_logs` table.
  *
- * The function is fire-and-forget safe: DB or logging failures are caught and
- * logged but never propagate to the caller so that business logic is never
- * interrupted by audit plumbing.
+ * @param userId  – ID of the user performing the action
+ * @param reason  – Short identifier for the event (e.g. "RIGHT_TO_BE_FORGOTTEN_EXECUTED")
+ * @param meta    – Optional request context and extra metadata
  */
-export async function logAuditEvent(
+export const logAuditEvent = async (
   userId: string,
   reason: string,
-  options?: AuditEventOptions,
-): Promise<void> {
-  const category: AuditEventCategory = options?.category ?? "system";
-  const severity: AuditEventSeverity = options?.severity ?? "medium";
-  const action = options?.action ?? reason;
-  const success = options?.success ?? true;
-
-  // 1. Persist to database
+  meta?: AuditEventMetadata,
+): Promise<void> => {
   try {
-    await pool.query(
-      `INSERT INTO audit_events
-         (user_id, action, reason, category, severity, metadata,
-          ip_address, user_agent, resource_type, resource_id,
-          performed_by, success, error_message)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-      [
-        userId,
-        action,
-        reason,
-        category,
-        severity,
-        options?.metadata ? JSON.stringify(options.metadata) : null,
-        options?.ipAddress ?? null,
-        options?.userAgent ?? null,
-        options?.resourceType ?? null,
-        options?.resourceId ?? null,
-        options?.performedBy ?? userId,
-        success,
-        options?.errorMessage ?? null,
-      ],
-    );
-  } catch (error) {
-    // Audit table may not exist yet during migrations — degrade gracefully
-    logger.error({ error, userId, action }, "Failed to persist audit event to database");
-  }
+    const query = `
+      INSERT INTO audit_logs (admin_id, action, resource, resource_id, diff, ip_address, user_agent, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+    `;
 
-  // 2. Structured log line (always emitted regardless of DB availability)
-  logger.info(
-    {
-      audit: true,
+    const diff = meta?.extra ? JSON.stringify(meta.extra) : null;
+
+    await pool.query(query, [
       userId,
-      action,
       reason,
-      category,
-      severity,
-      resourceType: options?.resourceType,
-      resourceId: options?.resourceId,
-      performedBy: options?.performedBy,
-      success,
-      metadata: options?.metadata,
-    },
-    `AUDIT: ${action}`,
-  );
-}
+      "user",
+      userId,
+      diff,
+      meta?.ipAddress ?? null,
+      meta?.userAgent ?? null,
+    ]);
+  } catch (error) {
+    console.error("[AuditLog] Failed to write audit event:", {
+      userId,
+      reason,
+      error,
+    });
+  }
+};
 
 /**
- * Query audit events with filtering, pagination, and ordering.
+ * Query audit log entries for a given user, ordered by most recent first.
  *
- * Returns both the rows and the total count (for pagination) so callers can
- * build offset/limit UIs without a second COUNT query when filters change.
+ * @param userId – user to fetch events for
+ * @param limit  – max rows to return (default 100)
+ * @param offset – row offset for pagination (default 0)
+ * @returns Array of audit log rows
  */
-export async function queryAuditEvents(filters: {
-  userId?: string;
-  category?: AuditEventCategory;
-  severity?: AuditEventSeverity;
-  resourceType?: string;
-  resourceId?: string;
-  performedBy?: string;
-  success?: boolean;
-  since?: Date;
-  until?: Date;
-  limit?: number;
-  offset?: number;
-} = {}): Promise<{ events: Record<string, unknown>[]; total: number }> {
-  const conditions: string[] = [];
-  const values: unknown[] = [];
-  let idx = 1;
-
-  if (filters.userId) {
-    conditions.push(`user_id = $${idx++}`);
-    values.push(filters.userId);
+export const queryAuditEvents = async (
+  userId: string,
+  limit: number = 100,
+  offset: number = 0,
+): Promise<Record<string, unknown>[]> => {
+  try {
+    const query = `
+      SELECT id, admin_id AS "userId", action, resource, diff, ip_address AS "ipAddress",
+             user_agent AS "userAgent", created_at AS "timestamp"
+      FROM audit_logs
+      WHERE admin_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3
+    `;
+    const result = await pool.query(query, [userId, limit, offset]);
+    return result.rows;
+  } catch (error) {
+    console.error("[AuditLog] Failed to query audit events:", { userId, error });
+    return [];
   }
-  if (filters.category) {
-    conditions.push(`category = $${idx++}`);
-    values.push(filters.category);
-  }
-  if (filters.severity) {
-    conditions.push(`severity = $${idx++}`);
-    values.push(filters.severity);
-  }
-  if (filters.resourceType) {
-    conditions.push(`resource_type = $${idx++}`);
-    values.push(filters.resourceType);
-  }
-  if (filters.resourceId) {
-    conditions.push(`resource_id = $${idx++}`);
-    values.push(filters.resourceId);
-  }
-  if (filters.performedBy) {
-    conditions.push(`performed_by = $${idx++}`);
-    values.push(filters.performedBy);
-  }
-  if (filters.success !== undefined) {
-    conditions.push(`success = $${idx++}`);
-    values.push(filters.success);
-  }
-  if (filters.since) {
-    conditions.push(`created_at >= $${idx++}`);
-    values.push(filters.since);
-  }
-  if (filters.until) {
-    conditions.push(`created_at <= $${idx++}`);
-    values.push(filters.until);
-  }
-
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-  const limit = Math.min(filters.limit ?? 100, 1000);
-  const offset = filters.offset ?? 0;
-
-  const [dataResult, countResult] = await Promise.all([
-    pool.query(
-      `SELECT id, user_id AS "userId", action, reason, category, severity,
-              metadata, ip_address AS "ipAddress", user_agent AS "userAgent",
-              resource_type AS "resourceType", resource_id AS "resourceId",
-              performed_by AS "performedBy", success, error_message AS "errorMessage",
-              created_at AS "createdAt"
-       FROM audit_events
-       ${whereClause}
-       ORDER BY created_at DESC
-       LIMIT $${idx++} OFFSET $${idx++}`,
-      [...values, limit, offset],
-    ),
-    pool.query(
-      `SELECT COUNT(*)::int AS total FROM audit_events ${whereClause}`,
-      values,
-    ),
-  ]);
-
-  return {
-    events: dataResult.rows,
-    total: countResult.rows[0]?.total ?? 0,
-  };
-}
+};

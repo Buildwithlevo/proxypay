@@ -5,47 +5,74 @@ export enum UserStatus {
   ACTIVE = "active",
   FROZEN = "frozen",
   SUSPENDED = "suspended",
+  DEACTIVATED = "deactivated",
 }
 
 export enum UserRole {
   USER = "user",
-  MERCHANT = "merchant",
   ADMIN = "admin",
   SUPER_ADMIN = "super-admin",
   COMPLIANCE_OFFICER = "compliance_officer",
+  DEVELOPER = "developer",
 }
 
 export enum KycLevel {
-  UNVERIFIED = "unverified",
+  NONE = "none",
   BASIC = "basic",
-  INTERMEDIATE = "intermediate",
+  ENHANCED = "enhanced",
   FULL = "full",
 }
 
+/**
+ * Comprehensive User model type.
+ * Maps to the `users` database table.
+ */
 export interface User {
+  /** Unique user identifier (UUID) */
   id: string;
+  /** Encrypted phone number (E.164 format before encryption) */
   phoneNumber: string;
+  /** KYC verification level */
   kycLevel: KycLevel | string;
-  role?: UserRole | string;
+  /** Preferred language code (e.g. "en", "fr") */
   preferredLanguage?: string;
+  /** Encrypted email address */
   email?: string;
+  /** User-chosen display name */
   displayName?: string | null;
+  /** Merchant Category Code for the user's business */
   mcc?: string | null;
+  /** Encrypted TOTP secret for 2FA */
   two_factor_secret?: string | null;
+  /** Array of one-time backup codes for 2FA recovery */
   backup_codes?: string[] | null;
-  status: UserStatus;
+  /** Account status */
+  status: UserStatus | string;
+  /** Token version for JWT invalidation on password/2FA changes */
   tokenVersion?: number;
-  isActive: boolean;
-  deactivatedAt?: Date | null;
+  /** Account creation timestamp */
   createdAt: Date;
+  /** Last profile update timestamp */
   updatedAt: Date;
+  /** Whether the user has opted out of SMS communications */
   smsOptOut?: boolean;
+  /** Whether 2FA is mandatory for withdrawal operations */
   mandatory2FAWithdrawals?: boolean;
+  /** Number of days to delay settlement payouts */
   settlementDelayDays?: number;
+  /** Whether the account is active (false = soft-deactivated) */
+  is_active?: boolean;
+  /** Timestamp when the account was soft-deactivated */
+  deactivated_at?: Date | null;
+  /** Encrypted first name (sensitive, only returned to authorized roles) */
   firstName?: string;
+  /** Encrypted last name (sensitive, only returned to authorized roles) */
   lastName?: string;
+  /** Encrypted physical address (sensitive) */
   address?: string;
+  /** Encrypted date of birth (sensitive) */
   dateOfBirth?: string;
+  /** Encrypted national ID number (sensitive) */
   idNumber?: string;
 }
 
@@ -78,7 +105,9 @@ export class UserModel {
       updatedAt: row.updated_at,
       smsOptOut: row.sms_opt_out ?? false,
       mandatory2FAWithdrawals: row.mandatory_2fa_withdrawals ?? false,
-
+      is_active: row.is_active ?? true,
+      deactivated_at: row.deactivated_at ?? null,
+      
       firstName: isAuthorized ? (decryptField(row.first_name) as string ?? undefined) : row.first_name ?? undefined,
       lastName: isAuthorized ? (decryptField(row.last_name) as string ?? undefined) : row.last_name ?? undefined,
       address: isAuthorized ? (decryptField(row.address) as string ?? undefined) : row.address ?? undefined,
