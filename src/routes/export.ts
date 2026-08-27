@@ -497,5 +497,52 @@ export function createExportRoutes(options?: {
     res.json({ exports: getExportMetricsHistory() });
   });
 
+  /**
+   * GET /export/progress/:exportId
+   * SSE endpoint for real-time progress reporting on a specific export.
+   * Clients subscribe and receive progress events until the export completes.
+   */
+  router.get('/export/progress/:exportId', (req: Request, res: Response) => {
+    if (!requireAdminKey(req, res)) return;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const exportId = req.params.exportId;
+
+    const checkProgress = () => {
+      const metrics = getExportMetricsHistory();
+      const latest = metrics[metrics.length - 1];
+
+      if (latest) {
+        const progress = {
+          exportId,
+          rowsExported: latest.rowsExported,
+          bytesWritten: latest.bytesWritten,
+          durationMs: latest.durationMs || Date.now() - latest.startedAt.getTime(),
+          status: latest.finishedAt ? 'completed' : 'in_progress',
+          format: latest.format,
+        };
+
+        res.write(`data: ${JSON.stringify(progress)}\n\n`);
+
+        if (latest.finishedAt) {
+          res.write(`data: ${JSON.stringify({ ...progress, status: 'completed' })}\n\n`);
+          res.end();
+          return;
+        }
+      }
+    };
+
+    const interval = setInterval(checkProgress, 1000);
+    checkProgress();
+
+    req.on('close', () => {
+      clearInterval(interval);
+    });
+  });
+
   return router;
 }
