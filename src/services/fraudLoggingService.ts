@@ -292,4 +292,182 @@ export const fraudLoggingService = {
       return false;
     }
   },
+
+  /**
+   * Log when a fraud alert is reviewed and marked as a false positive
+   */
+  logFalsePositiveReview: async (
+    alertId: string,
+    reviewer: string,
+    reason: string,
+    notes?: string,
+  ): Promise<boolean> => {
+    try {
+      const query = `
+        UPDATE fraud_alerts
+        SET
+          status = 'dismissed',
+          feedback = 'false_positive',
+          feedback_by = $1,
+          feedback_notes = $2,
+          feedback_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $3
+        RETURNING id
+      `;
+      const feedbackNotes = notes ? `${reason} | ${notes}` : reason;
+      const result = await pool.query(query, [reviewer, feedbackNotes, alertId]);
+
+      if (result.rows.length === 0) {
+        logger.warn({ alertId }, 'Fraud alert not found for false positive review');
+        return false;
+      }
+
+      logger.info({ alertId, reviewer, reason }, 'Fraud alert marked as false positive');
+      return true;
+    } catch (error) {
+      logger.error({ err: error, alertId }, 'Failed to log false positive review');
+      return false;
+    }
+  },
+
+  /**
+   * Return aggregate statistics for fraud evaluations within a given time range
+   */
+  getFraudSummaryStats: async (
+    startDate: Date,
+    endDate: Date,
+  ): Promise<{
+    totalEvaluations: number;
+    fraudRate: number;
+    avgScore: number;
+    byRiskLevel: Record<string, number>;
+  }> => {
+    try {
+      const query = `
+        SELECT
+          COUNT(*) AS "totalEvaluations",
+          ROUND(
+            (COUNT(*) FILTER (WHERE is_fraud = true))::numeric / NULLIF(COUNT(*), 0) * 100,
+            2
+          ) AS "fraudRate",
+          ROUND(AVG(score)::numeric, 2) AS "avgScore",
+          COUNT(*) FILTER (WHERE risk_level = 'low') AS "low",
+          COUNT(*) FILTER (WHERE risk_level = 'medium') AS "medium",
+          COUNT(*) FILTER (WHERE risk_level = 'high') AS "high",
+          COUNT(*) FILTER (WHERE risk_level = 'critical') AS "critical"
+        FROM fraud_evaluation_logs
+        WHERE created_at >= $1 AND created_at <= $2
+      `;
+      const result = await pool.query(query, [startDate, endDate]);
+      const row = result.rows[0];
+
+      return {
+        totalEvaluations: parseInt(row.totalEvaluations, 10) || 0,
+        fraudRate: parseFloat(row.fraudRate) || 0,
+        avgScore: parseFloat(row.avgScore) || 0,
+        byRiskLevel: {
+          low: parseInt(row.low, 10) || 0,
+          medium: parseInt(row.medium, 10) || 0,
+          high: parseInt(row.high, 10) || 0,
+          critical: parseInt(row.critical, 10) || 0,
+        },
+      };
+    } catch (error) {
+      logger.error({ err: error, startDate, endDate }, 'Failed to fetch fraud summary stats');
+      return {
+        totalEvaluations: 0,
+        fraudRate: 0,
+        avgScore: 0,
+        byRiskLevel: { low: 0, medium: 0, high: 0, critical: 0 },
+      };
+    }
+  },
+
+  /**
+   * Return fraud evaluation logs in CSV-friendly format (flat objects)
+   */
+  exportFraudLogs: async (filter: FraudEvaluationFilter = {}): Promise<Record<string, string | number | boolean | null>[]> => {
+    try {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let paramIndex = 1;
+
+      if (filter.userId) {
+        conditions.push(`user_id = $${paramIndex++}`);
+        params.push(filter.userId);
+      }
+      if (filter.isFraud !== undefined) {
+        conditions.push(`is_fraud = $${paramIndex++}`);
+        params.push(filter.isFraud);
+      }
+      if (filter.riskLevel) {
+        conditions.push(`risk_level = $${paramIndex++}`);
+        params.push(filter.riskLevel);
+      }
+      if (filter.startDate) {
+        conditions.push(`created_at >= $${paramIndex++}`);
+        params.push(filter.startDate);
+      }
+      if (filter.endDate) {
+        conditions.push(`created_at <= $${paramIndex++}`);
+        params.push(filter.endDate);
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const limit = filter.limit ?? 1000;
+      const offset = filter.offset ?? 0;
+
+      const query = `
+        SELECT
+          id,
+          transaction_id AS "transactionId",
+          user_id AS "userId",
+          amount,
+          phone_number AS "phoneNumber",
+          provider,
+          type,
+          status,
+          ip_address AS "ipAddress",
+          user_agent AS "userAgent",
+          device_fingerprint AS "deviceFingerprint",
+          is_fraud AS "isFraud",
+          score,
+          risk_level AS "riskLevel",
+          recommended_action AS "recommendedAction",
+          duration_ms AS "durationMs",
+          transaction_history_count AS "transactionHistoryCount",
+          created_at AS "createdAt"
+        FROM fraud_evaluation_logs
+        ${whereClause}
+        ORDER BY created_at DESC
+        LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+      `;
+      const result = await pool.query(query, [...params, limit, offset]);
+
+      return result.rows.map((row) => ({
+        id: row.id,
+        transactionId: row.transactionId,
+        userId: row.userId,
+        amount: row.amount,
+        phoneNumber: row.phoneNumber,
+        provider: row.provider,
+        type: row.type,
+        status: row.status,
+        ipAddress: row.ipAddress,
+        userAgent: row.userAgent,
+        deviceFingerprint: row.deviceFingerprint,
+        isFraud: row.isFraud,
+        score: row.score,
+        riskLevel: row.riskLevel,
+        recommendedAction: row.recommendedAction,
+        durationMs: row.durationMs,
+        transactionHistoryCount: row.transactionHistoryCount,
+        createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
+      }));
+    } catch (error) {
+      logger.error({ err: error }, 'Failed to export fraud logs');
+      return [];
+    }
+  },
 };
