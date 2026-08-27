@@ -12,7 +12,7 @@ import {
   scanForLongRunningTransactions,
   getTrackedTransactionCount,
 } from "../middleware/transactionLeakDetector";
-import { pool, checkReplicaHealth } from "../config/database";
+import { pool, writePool, checkReplicaHealth } from "../config/database";
 
 const router = Router();
 
@@ -33,6 +33,11 @@ router.get("/", async (_req: Request, res: Response) => {
         totalCount: (pool as any).totalCount || 0,
         idleCount: (pool as any).idleCount || 0,
         waitingCount: (pool as any).waitingCount || 0,
+      },
+      write: {
+        totalCount: (writePool as any).totalCount || 0,
+        idleCount: (writePool as any).idleCount || 0,
+        waitingCount: (writePool as any).waitingCount || 0,
       },
       replicas: replicaHealth,
       transactions: stats,

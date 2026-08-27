@@ -158,7 +158,67 @@ export const env = cleanEnv(process.env, {
   }),
   XERO_REDIRECT_URI: str({
     default: "http://localhost:3000/api/accounting/xero/callback",
-    desc: "Xero OAuth 2.0 Redirect URI",
+    desc: "Xero Online OAuth 2.0 Redirect URI",
+  }),
+  DB_POOL_MAX: num({
+    default: 1000,
+    desc: "Maximum number of connections in the primary read connection pool",
+    example: "1000",
+  }),
+  DB_POOL_MIN: num({
+    default: 0,
+    desc: "Minimum number of connections kept in the primary read connection pool",
+    example: "0",
+  }),
+  DB_POOL_IDLE_TIMEOUT_MS: num({
+    default: 30000,
+    desc: "Idle timeout in milliseconds before an idle read-pool connection is closed",
+    example: "30000",
+  }),
+  DB_POOL_CONNECTION_TIMEOUT_MS: num({
+    default: 500,
+    desc: "Maximum time in milliseconds to wait for a read-pool connection before erroring",
+    example: "500",
+  }),
+  DB_WRITE_POOL_MAX: num({
+    default: 1000,
+    desc: "Maximum number of connections in the dedicated write connection pool",
+    example: "1000",
+  }),
+  DB_WRITE_POOL_MIN: num({
+    default: 0,
+    desc: "Minimum number of connections kept in the dedicated write connection pool",
+    example: "0",
+  }),
+  DB_WRITE_POOL_IDLE_TIMEOUT_MS: num({
+    default: 30000,
+    desc: "Idle timeout in milliseconds before an idle write-pool connection is closed",
+    example: "30000",
+  }),
+  DB_WRITE_POOL_CONNECTION_TIMEOUT_MS: num({
+    default: 500,
+    desc: "Maximum time in milliseconds to wait for a write-pool connection before erroring",
+    example: "500",
+  }),
+  DB_REPLICA_POOL_MAX: num({
+    default: 100,
+    desc: "Maximum number of connections per individual read replica pool",
+    example: "100",
+  }),
+  DB_REPLICA_POOL_IDLE_TIMEOUT_MS: num({
+    default: 30000,
+    desc: "Idle timeout in milliseconds before an idle replica-pool connection is closed",
+    example: "30000",
+  }),
+  DB_REPLICA_POOL_CONNECTION_TIMEOUT_MS: num({
+    default: 500,
+    desc: "Maximum time in milliseconds to wait for a replica-pool connection before erroring",
+    example: "500",
+  }),
+  DB_POOL_MONITOR_INTERVAL_MS: num({
+    default: 5000,
+    desc: "How often (ms) pool utilization monitoring samples pool gauges",
+    example: "5000",
   }),
 });
 
@@ -194,4 +254,16 @@ export const {
   XERO_CLIENT_ID,
   XERO_CLIENT_SECRET,
   XERO_REDIRECT_URI,
+  DB_POOL_MAX,
+  DB_POOL_MIN,
+  DB_POOL_IDLE_TIMEOUT_MS,
+  DB_POOL_CONNECTION_TIMEOUT_MS,
+  DB_WRITE_POOL_MAX,
+  DB_WRITE_POOL_MIN,
+  DB_WRITE_POOL_IDLE_TIMEOUT_MS,
+  DB_WRITE_POOL_CONNECTION_TIMEOUT_MS,
+  DB_REPLICA_POOL_MAX,
+  DB_REPLICA_POOL_IDLE_TIMEOUT_MS,
+  DB_REPLICA_POOL_CONNECTION_TIMEOUT_MS,
+  DB_POOL_MONITOR_INTERVAL_MS,
 } = env;

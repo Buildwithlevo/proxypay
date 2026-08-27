@@ -176,6 +176,49 @@ export const dbReplicaFailoversTotal = new Counter({
   registers: [register],
 });
 
+// Connection Pool Utilization Metrics
+export const dbPoolUtilization = new Gauge({
+  name: "db_pool_utilization",
+  help: "Fraction of the connection pool currently in use (0–1)",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolTotalConnections = new Gauge({
+  name: "db_pool_total_connections",
+  help: "Total number of connections in the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolIdleConnections = new Gauge({
+  name: "db_pool_idle_connections",
+  help: "Number of idle connections in the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolWaitingConnections = new Gauge({
+  name: "db_pool_waiting_connections",
+  help: "Number of queries waiting for a free connection from the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolMaxConnections = new Gauge({
+  name: "db_pool_max_connections",
+  help: "Configured maximum number of connections in the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolConfig = new Gauge({
+  name: "db_pool_config",
+  help: "Configured connection pool parameters (idle timeout, connection timeout, min)",
+  labelNames: ["pool", "role", "param"],
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics
