@@ -170,6 +170,12 @@ export const dbReplicaReadEnabled = new Gauge({
   registers: [register],
 });
 
+export const dbReplicaFailoversTotal = new Counter({
+  name: "db_replica_failovers_total",
+  help: "Total number of read query failovers from replica to primary",
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics
@@ -342,36 +348,29 @@ export const transactionClassifierTrainingSamples = new Gauge({
 export const webhookRetryAttemptsTotal = new Counter({
   name: "webhook_retry_attempts_total",
   help: "Total number of webhook retry attempts",
-  labelNames: ["merchant_id", "status", "attempt"],
+  labelNames: ["event_type", "attempt", "status_code"],
   registers: [register],
 });
 
-export const webhookRetryDelaySeconds = new Histogram({
-  name: "webhook_retry_delay_seconds",
-  help: "Delay between webhook retry attempts in seconds",
-  labelNames: ["merchant_id"],
+export const webhookDeliveryDurationSeconds = new Histogram({
+  name: "webhook_delivery_duration_seconds",
+  help: "Duration of webhook delivery attempts in seconds",
+  labelNames: ["event_type", "status"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30],
+  registers: [register],
+});
+
+export const webhookDeliveryRetriesTotal = new Counter({
+  name: "webhook_delivery_retries_total",
+  help: "Total number of webhook deliveries that required retries",
+  labelNames: ["event_type", "final_status"],
+  registers: [register],
+});
+
+export const webhookBackoffDelaySeconds = new Histogram({
+  name: "webhook_backoff_delay_seconds",
+  help: "Backoff delay applied between webhook retry attempts in seconds",
+  labelNames: ["event_type", "attempt"],
   buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
-  registers: [register],
-});
-
-export const webhookRetryPolicyUpdatesTotal = new Counter({
-  name: "webhook_retry_policy_updates_total",
-  help: "Total number of webhook retry policy updates",
-  labelNames: ["action"],
-  registers: [register],
-});
-
-// Batch Processing Metrics
-export const batchProcessingParallelItemsTotal = new Counter({
-  name: "batch_processing_parallel_items_total",
-  help: "Total number of items processed in parallel batches",
-  labelNames: ["provider", "status"],
-  registers: [register],
-});
-
-export const batchProcessingCircuitBreakerTripsTotal = new Counter({
-  name: "batch_processing_circuit_breaker_trips_total",
-  help: "Total number of circuit breaker trips in batch processing",
-  labelNames: ["provider"],
   registers: [register],
 });

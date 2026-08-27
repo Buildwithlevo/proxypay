@@ -3,6 +3,12 @@ import { webhookPayloadSchema, flatWebhookPayloadSchema } from "./webhookSchema"
 import { gzip } from "zlib";
 import { promisify } from "util";
 import { Transaction, WebhookDeliveryUpdate } from "../models/transaction";
+import {
+  webhookRetryAttemptsTotal,
+  webhookDeliveryDurationSeconds,
+  webhookDeliveryRetriesTotal,
+  webhookBackoffDelaySeconds,
+} from "../utils/metrics";
 
 const gzipAsync = promisify(gzip);
 
@@ -221,16 +227,18 @@ export class WebhookService {
     this.webhookUrl = options.webhookUrl ?? process.env.WEBHOOK_URL ?? "";
     this.webhookSecret =
       options.webhookSecret ?? process.env.WEBHOOK_SECRET ?? "";
-    this.maxAttempts = options.maxAttempts ?? 3;
-    this.baseDelayMs = options.baseDelayMs ?? 500;
-    this.maxDelayMs = options.maxDelayMs ?? 30000; // 30 seconds max delay
-    this.jitterFactor = options.jitterFactor ?? 0.2; // 20% jitter
+    this.maxAttempts = options.maxAttempts
+      ?? (parseInt(process.env.WEBHOOK_MAX_ATTEMPTS || "", 10) || 3);
+    this.baseDelayMs = options.baseDelayMs
+      ?? (parseInt(process.env.WEBHOOK_BASE_DELAY_MS || "", 10) || 500);
+    this.maxDelayMs = options.maxDelayMs
+      ?? (parseInt(process.env.WEBHOOK_MAX_DELAY_MS || "", 10) || 30000);
+    this.jitterFactor = options.jitterFactor
+      ?? (parseFloat(process.env.WEBHOOK_JITTER_FACTOR || "") || 0.2);
     this.sleepImpl = options.sleep ?? wait;
     this.now = options.now ?? (() => new Date());
     this.logger = options.logger ?? console;
     this.compress = options.compress ?? (process.env.WEBHOOK_COMPRESSION === "true");
-    // Zod schemas for payload validation
-    // Imported lazily to avoid circular dependencies
   }
 
   buildPayload(event: WebhookEvent, transaction: Transaction): WebhookPayload {
@@ -326,6 +334,7 @@ export class WebhookService {
     let lastStatusCode: number | undefined;
     let lastAttemptAt: Date | null = null;
     let finalAttempt = 0;
+    const deliveryStart = Date.now();
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       lastAttemptAt = this.now();
@@ -346,6 +355,16 @@ export class WebhookService {
         this.logger.log(
           `[webhook] delivered event=${event} transactionId=${payload.data.id} attempt=${attempt} compressed=${this.compress}`,
         );
+
+        // Track delivery duration
+        const durationSecs = (Date.now() - deliveryStart) / 1000;
+        webhookDeliveryDurationSeconds.observe({ event_type: event, status: "delivered" }, durationSecs);
+
+        // Track if retries were needed
+        if (attempt > 1) {
+          webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "delivered" });
+        }
+
         return {
           status: "delivered",
           attempts: attempt,
@@ -360,6 +379,14 @@ export class WebhookService {
         this.logger.warn(
           `[webhook] delivery failed event=${event} transactionId=${payload.data.id} attempt=${attempt}/${this.maxAttempts}: ${lastError}`,
         );
+
+        // Track retry attempt
+        webhookRetryAttemptsTotal.inc({
+          event_type: event,
+          attempt: String(attempt),
+          status_code: String(lastStatusCode || 0),
+        });
+
         // Check if we should retry based on error type
         if (attempt < this.maxAttempts && isRetryableError(error, lastStatusCode)) {
           const delayMs = calculateBackoffDelay(
@@ -368,6 +395,7 @@ export class WebhookService {
             this.maxDelayMs,
             this.jitterFactor,
           );
+          webhookBackoffDelaySeconds.observe({ event_type: event, attempt: String(attempt) }, delayMs / 1000);
           this.logger.log(
             `[webhook] retrying in ${delayMs}ms event=${event} transactionId=${payload.data.id} attempt=${attempt + 1}/${this.maxAttempts}`,
           );
@@ -385,6 +413,12 @@ export class WebhookService {
     this.logger.error(
       `[webhook] delivery exhausted event=${event} transactionId=${payload.data.id}: ${lastError}`,
     );
+
+    // Track failed delivery
+    const durationSecs = (Date.now() - deliveryStart) / 1000;
+    webhookDeliveryDurationSeconds.observe({ event_type: event, status: "failed" }, durationSecs);
+    webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "failed" });
+
     return {
       status: "failed",
       attempts: finalAttempt,
@@ -436,6 +470,7 @@ export class WebhookService {
     let lastStatusCode: number | undefined;
     let lastAttemptAt: Date | null = null;
     let finalAttempt = 0;
+    const deliveryStart = Date.now();
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       lastAttemptAt = this.now();
@@ -456,6 +491,13 @@ export class WebhookService {
         this.logger.log(
           `[webhook] delivered flat event=${event} transactionId=${payload.transaction_id} attempt=${attempt} compressed=${this.compress}`,
         );
+
+        const durationSecs = (Date.now() - deliveryStart) / 1000;
+        webhookDeliveryDurationSeconds.observe({ event_type: event, status: "delivered" }, durationSecs);
+        if (attempt > 1) {
+          webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "delivered" });
+        }
+
         return {
           status: "delivered",
           attempts: attempt,
@@ -470,6 +512,13 @@ export class WebhookService {
         this.logger.warn(
           `[webhook] delivery failed flat event=${event} transactionId=${payload.transaction_id} attempt=${attempt}/${this.maxAttempts}: ${lastError}`,
         );
+
+        webhookRetryAttemptsTotal.inc({
+          event_type: event,
+          attempt: String(attempt),
+          status_code: String(lastStatusCode || 0),
+        });
+
         // Check if we should retry based on error type
         if (attempt < this.maxAttempts && isRetryableError(error, lastStatusCode)) {
           const delayMs = calculateBackoffDelay(
@@ -478,6 +527,7 @@ export class WebhookService {
             this.maxDelayMs,
             this.jitterFactor,
           );
+          webhookBackoffDelaySeconds.observe({ event_type: event, attempt: String(attempt) }, delayMs / 1000);
           this.logger.log(
             `[webhook] retrying in ${delayMs}ms flat event=${event} transactionId=${payload.transaction_id} attempt=${attempt + 1}/${this.maxAttempts}`,
           );
@@ -495,6 +545,11 @@ export class WebhookService {
     this.logger.error(
       `[webhook] delivery exhausted flat event=${event} transactionId=${payload.transaction_id}: ${lastError}`,
     );
+
+    const durationSecs = (Date.now() - deliveryStart) / 1000;
+    webhookDeliveryDurationSeconds.observe({ event_type: event, status: "failed" }, durationSecs);
+    webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "failed" });
+
     return {
       status: "failed",
       attempts: finalAttempt,
