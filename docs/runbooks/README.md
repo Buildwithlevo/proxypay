@@ -42,6 +42,7 @@ diagnosis → mitigation → recovery → post-incident.
 | 08 | [Read-replica lag](./08-replica-lag.md) | `db_replica_lag_seconds` high, stale reads | P3 |
 | 09 | [Ledger imbalance](./09-ledger-imbalance.md) | `reconcile:ledger` reports debits ≠ credits | P1 |
 | 10 | [Elevated error rate](./10-elevated-error-rate.md) | Error-rate alert, `transaction_errors_total` spike | P2 |
+| 11 | [Cross-region database failover](./11-database-failover.md) | `db_dr_mode=1`, `/ready` DB down, region outage | P1 |
 
 ---
 

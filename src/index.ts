@@ -51,7 +51,7 @@ import {
 import { rateLimitMiddleware } from "./middleware/rateLimitRedis";
 import rateLimitDefaultMiddleware from "./middleware/rateLimit";
 import { createOAuthRouter } from "./auth/oauth";
-import { pool } from "./config/database";
+import { getReplicationStatus, pool } from "./config/database";
 import {
   globalTimeout,
   haltOnTimedout,
@@ -328,6 +328,19 @@ app.get("/ready", async (_req: Request, res: Response) => {
   } catch (err) {
     console.error("Redis check failed", err);
     allReady = false;
+  }
+
+  // Replication status is informational: a lagging or down replica degrades
+  // the replication check but reads fall back to the primary, so it does not
+  // flip the pod to not-ready (that would defeat DR redundancy).
+  try {
+    const replication = await getReplicationStatus();
+    checks.replication = replication.status;
+    checks.dr_mode = replication.drMode;
+  } catch (err) {
+    console.error("Replication check failed", err);
+    checks.replication = "unknown";
+    checks.dr_mode = "standby";
   }
 
   const body: ReadinessCheckResponse = {

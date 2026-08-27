@@ -7,6 +7,10 @@ import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
 const DR_DATABASE_URL = process.env.DR_DATABASE_URL;
 const isDRMode = (): boolean => !!DR_DATABASE_URL;
 
+// Expose DR mode as a Prometheus gauge so dashboards/alerting can react to
+// failover without parsing logs. 1 = failover active, 0 = standby/normal.
+dbDrMode.set(isDRMode() ? 1 : 0);
+
 const productionSsl =
   process.env.NODE_ENV === "production" ? { rejectUnauthorized: true } : undefined;
 
@@ -568,6 +572,8 @@ export async function getPoolStats(): Promise<{
   replicas: Array<{
     url: string;
     healthy: boolean;
+    enabled: boolean;
+    lagSeconds: number | null;
   }>;
 }> {
   const replicaStats = await checkReplicaHealth();

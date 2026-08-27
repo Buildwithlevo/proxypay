@@ -2136,6 +2136,28 @@ router.get(
   },
 );
 
+// GET /api/admin/database/replication — cross-region replication status
+router.get(
+  "/database/replication",
+  requireAdmin,
+  logAdminAction("GET_DATABASE_REPLICATION"),
+  async (_req: Request, res: Response) => {
+    try {
+      const stats = await getPoolStats();
+      res.json({ success: true, ...stats });
+    } catch (err) {
+      console.error("Error fetching replication status:", err);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch replication status",
+        {
+          message: err instanceof Error ? err.message : "Unknown error",
+        },
+      );
+    }
+  },
+);
+
 /**
  * =========================
  * FINANCIAL DASHBOARD
