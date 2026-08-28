@@ -115,6 +115,7 @@ import {
   stopHeartbeatService,
 } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
+import { slidingWindowRateLimit } from "./middleware/slidingWindowRateLimit";
 
 // Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -432,7 +433,6 @@ app.use(haltOnTimedout);
 app.use(apiVersionMiddleware);
 app.use(validateVersionMiddleware);
 app.use("/oauth", createOAuthRouter());
-app.use("/api/auth", authRoutes);
 
 // Replay retried mutations instead of processing them twice (Idempotency-Key)
 app.use("/api/v1/transactions", idempotency());

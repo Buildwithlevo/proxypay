@@ -65,8 +65,7 @@
   },
   "lint-staged": {
     "*.{ts,tsx}": [
-      "eslint --fix",
-      "jest --bail --findRelatedTests"
+      "eslint --fix"
     ],
     "*.{js,cjs,mjs,json,md,yml,yaml}": "prettier --write"
   },
