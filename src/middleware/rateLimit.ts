@@ -38,6 +38,50 @@ export const RATE_LIMIT_CONFIG = {
 };
 
 /**
+ * Tier-based Rate Limit Configuration
+ * Defines per-minute request limits for each user tier
+ */
+export const TIER_RATE_LIMITS = {
+  free: { limit: 60, windowMs: 60 * 1000 },       // 60 req/min
+  pro: { limit: 300, windowMs: 60 * 1000 },         // 300 req/min
+  enterprise: { limit: 1000, windowMs: 60 * 1000 }, // 1000 req/min
+} as const;
+
+export type UserTier = keyof typeof TIER_RATE_LIMITS;
+
+/**
+ * Factory: creates a per-tier rate limit middleware.
+ * Uses the Redis-based checkRateLimit helper with a tier-scoped key.
+ *
+ * @param tier - The user tier ('free' | 'pro' | 'enterprise')
+ * @returns Express middleware that enforces the tier's rate limit
+ */
+export function createTierRateLimitMiddleware(tier: UserTier) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const { limit, windowMs } = TIER_RATE_LIMITS[tier];
+    const key = `tier-rate-limit:${tier}:${req.ip}`;
+    const { allowed, remaining, resetTime } = await checkRateLimit(key, limit, windowMs);
+
+    res.setHeader("X-RateLimit-Limit", limit);
+    res.setHeader("X-RateLimit-Remaining", remaining);
+    res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+    if (!allowed) {
+      const retryAfter = windowMs / 1000;
+      res.setHeader("Retry-After", String(retryAfter));
+
+      return res.status(429).json({
+        error: "Rate limit exceeded",
+        tier,
+        retryAfter,
+      });
+    }
+
+    next();
+  };
+}
+
+/**
  * Interface for tracking rate limit data
  */
 interface RateLimitEntry {
