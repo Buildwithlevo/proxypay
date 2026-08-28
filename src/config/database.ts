@@ -1,4 +1,5 @@
 import { Pool, QueryConfig, QueryResult, QueryResultRow, PoolClient } from "pg";
+import { createHash } from "crypto";
 import { auditService } from "../services/auditlogService";
 import { isReadOnlyQuery } from "../utils/readOnlyDetector";
 import { dbReplicaLagSeconds, dbReplicaReadEnabled, dbReplicaFailoversTotal } from "../utils/metrics";
@@ -84,15 +85,56 @@ function sanitizeParams(params: any[]): any[] {
 /**
  * Logs slow queries with sanitized information
  */
-function logSlowQuery(query: string, duration: number, params?: any[]): void {
+type SlowQueryDetails = {
+  pool?: "primary" | "replica";
+  status?: "success" | "error";
+  rowCount?: number | null;
+  error?: unknown;
+};
+
+function getQueryOperation(query: string): string {
+  return query.trim().split(/\s+/, 1)[0]?.toUpperCase() || "UNKNOWN";
+}
+
+function getQueryFingerprint(query: string): string {
+  const normalizedQuery = query.trim().replace(/\s+/g, " ").toLowerCase();
+  return createHash("sha256").update(normalizedQuery).digest("hex").slice(0, 16);
+}
+
+function getErrorDetails(error: unknown): { message: string; code?: string } | undefined {
+  if (!error || typeof error !== "object") return undefined;
+
+  const databaseError = error as { message?: unknown; code?: unknown };
+  return {
+    message: databaseError.message ? String(databaseError.message) : "Unknown database error",
+    ...(databaseError.code ? { code: String(databaseError.code) } : {}),
+  };
+}
+
+function logSlowQuery(
+  query: string,
+  duration: number,
+  params?: any[],
+  details: SlowQueryDetails = {},
+): void {
   if (!ENABLE_SLOW_QUERY_LOGGING) return;
 
+  const sanitizedQuery = sanitizeQuery(query);
   const logEntry = {
     type: "slow_query",
     duration: Math.round(duration),
+    duration_ms: Math.round(duration),
     threshold: SLOW_QUERY_THRESHOLD_MS,
-    query: sanitizeQuery(query),
+    threshold_ms: SLOW_QUERY_THRESHOLD_MS,
+    query: sanitizedQuery,
+    query_fingerprint: getQueryFingerprint(query),
+    query_operation: getQueryOperation(query),
+    query_length: query.length,
     params: params ? sanitizeParams(params) : undefined,
+    pool: details.pool || "primary",
+    status: details.status || "success",
+    row_count: details.rowCount,
+    error: getErrorDetails(details.error),
     timestamp: new Date().toISOString(),
   };
 
@@ -121,7 +163,11 @@ class SlowQueryPool extends Pool {
       const durationMs = Number(endTime - startTime) / 1e6;
 
       if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
-        logSlowQuery(queryString, durationMs, queryParams);
+        logSlowQuery(queryString, durationMs, queryParams, {
+          pool: "primary",
+          status: "success",
+          rowCount: result.rowCount,
+        });
       }
 
       return result;
@@ -130,7 +176,11 @@ class SlowQueryPool extends Pool {
       const durationMs = Number(endTime - startTime) / 1e6;
 
       if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
-        logSlowQuery(queryString, durationMs, queryParams);
+        logSlowQuery(queryString, durationMs, queryParams, {
+          pool: "primary",
+          status: "error",
+          error,
+        });
       }
 
       throw error;
@@ -171,7 +221,11 @@ const originalPoolQuery = pool.query.bind(pool);
     const endTime = process.hrtime.bigint();
     const durationMs = Number(endTime - startTime) / 1e6;
     if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
-      logSlowQuery(queryString, durationMs, queryParams);
+      logSlowQuery(queryString, durationMs, queryParams, {
+        pool: "primary",
+        status: "success",
+        rowCount: result.rowCount,
+      });
     }
 
     // PII Audit Interceptor
@@ -209,7 +263,11 @@ const originalPoolQuery = pool.query.bind(pool);
     const endTime = process.hrtime.bigint();
     const durationMs = Number(endTime - startTime) / 1e6;
     if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
-      logSlowQuery(queryString, durationMs, queryParams);
+      logSlowQuery(queryString, durationMs, queryParams, {
+        pool: "primary",
+        status: "error",
+        error,
+      });
     }
     throw error;
   }
