@@ -379,6 +379,7 @@ export class TransactionModel {
     await ws?.broadcastTransactionUpdate({
       id,
       status,
+      type: row.type,
       userId: row.user_id,
     });
   }

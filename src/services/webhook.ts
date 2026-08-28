@@ -3,6 +3,12 @@ import { webhookPayloadSchema, flatWebhookPayloadSchema } from "./webhookSchema"
 import { gzip } from "zlib";
 import { promisify } from "util";
 import { Transaction, WebhookDeliveryUpdate } from "../models/transaction";
+import {
+  webhookRetryAttemptsTotal,
+  webhookDeliveryDurationSeconds,
+  webhookDeliveryRetriesTotal,
+  webhookBackoffDelaySeconds,
+} from "../utils/metrics";
 
 const gzipAsync = promisify(gzip);
 
@@ -84,6 +90,8 @@ interface WebhookServiceOptions {
   webhookSecret?: string;
   maxAttempts?: number;
   baseDelayMs?: number;
+  maxDelayMs?: number;
+  jitterFactor?: number;
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
   logger?: WebhookLogger;
@@ -108,6 +116,52 @@ export interface WebhookOutboxModel {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Calculate exponential backoff delay with jitter and max cap.
+ * @param baseDelayMs - Base delay in milliseconds
+ * @param attempt - Current attempt number (1-indexed)
+ * @param maxDelayMs - Maximum delay cap in milliseconds
+ * @param jitterFactor - Jitter factor (0-1) to add randomness
+ * @returns Delay in milliseconds
+ */
+function calculateBackoffDelay(
+  baseDelayMs: number,
+  attempt: number,
+  maxDelayMs: number,
+  jitterFactor: number,
+): number {
+  const exponentialDelay = baseDelayMs * Math.pow(2, attempt - 1);
+  const cappedDelay = Math.min(exponentialDelay, maxDelayMs);
+  const jitter = cappedDelay * jitterFactor * Math.random();
+  return Math.floor(cappedDelay + jitter);
+}
+
+/**
+ * Determine if an error is retryable.
+ * Retry on: network errors, timeouts, 5xx server errors
+ * Don't retry on: 4xx client errors (except 429 Too Many Requests)
+ * @param error - The error that occurred
+ * @param statusCode - HTTP status code if available
+ * @returns true if the request should be retried
+ */
+function isRetryableError(
+  error: unknown,
+  statusCode?: number,
+): boolean {
+  if (statusCode !== undefined) {
+    // Retry on 429 (rate limited) and 5xx server errors
+    if (statusCode === 429 || (statusCode >= 500 && statusCode < 600)) {
+      return true;
+    }
+    // Don't retry on other 4xx client errors
+    if (statusCode >= 400 && statusCode < 500) {
+      return false;
+    }
+  }
+  // Retry on network errors (no status code)
+  return true;
 }
 
 function getStringValue(
@@ -160,6 +214,8 @@ export class WebhookService {
   private readonly webhookSecret: string;
   private readonly maxAttempts: number;
   private readonly baseDelayMs: number;
+  private readonly maxDelayMs: number;
+  private readonly jitterFactor: number;
   private readonly sleepImpl: (ms: number) => Promise<void>;
   private readonly now: () => Date;
   private readonly logger: WebhookLogger;
@@ -171,14 +227,18 @@ export class WebhookService {
     this.webhookUrl = options.webhookUrl ?? process.env.WEBHOOK_URL ?? "";
     this.webhookSecret =
       options.webhookSecret ?? process.env.WEBHOOK_SECRET ?? "";
-    this.maxAttempts = options.maxAttempts ?? 3;
-    this.baseDelayMs = options.baseDelayMs ?? 500;
+    this.maxAttempts = options.maxAttempts
+      ?? (parseInt(process.env.WEBHOOK_MAX_ATTEMPTS || "", 10) || 3);
+    this.baseDelayMs = options.baseDelayMs
+      ?? (parseInt(process.env.WEBHOOK_BASE_DELAY_MS || "", 10) || 500);
+    this.maxDelayMs = options.maxDelayMs
+      ?? (parseInt(process.env.WEBHOOK_MAX_DELAY_MS || "", 10) || 30000);
+    this.jitterFactor = options.jitterFactor
+      ?? (parseFloat(process.env.WEBHOOK_JITTER_FACTOR || "") || 0.2);
     this.sleepImpl = options.sleep ?? wait;
     this.now = options.now ?? (() => new Date());
     this.logger = options.logger ?? console;
     this.compress = options.compress ?? (process.env.WEBHOOK_COMPRESSION === "true");
-    // Zod schemas for payload validation
-    // Imported lazily to avoid circular dependencies
   }
 
   buildPayload(event: WebhookEvent, transaction: Transaction): WebhookPayload {
@@ -273,9 +333,12 @@ export class WebhookService {
     let lastError: string | null = null;
     let lastStatusCode: number | undefined;
     let lastAttemptAt: Date | null = null;
+    let finalAttempt = 0;
+    const deliveryStart = Date.now();
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       lastAttemptAt = this.now();
+      finalAttempt = attempt;
       try {
         const response = await this.fetchImpl(this.webhookUrl, {
           method: "POST",
@@ -292,6 +355,16 @@ export class WebhookService {
         this.logger.log(
           `[webhook] delivered event=${event} transactionId=${payload.data.id} attempt=${attempt} compressed=${this.compress}`,
         );
+
+        // Track delivery duration
+        const durationSecs = (Date.now() - deliveryStart) / 1000;
+        webhookDeliveryDurationSeconds.observe({ event_type: event, status: "delivered" }, durationSecs);
+
+        // Track if retries were needed
+        if (attempt > 1) {
+          webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "delivered" });
+        }
+
         return {
           status: "delivered",
           attempts: attempt,
@@ -306,17 +379,49 @@ export class WebhookService {
         this.logger.warn(
           `[webhook] delivery failed event=${event} transactionId=${payload.data.id} attempt=${attempt}/${this.maxAttempts}: ${lastError}`,
         );
-        if (attempt < this.maxAttempts)
-          await this.sleepImpl(this.baseDelayMs * 2 ** (attempt - 1));
+
+        // Track retry attempt
+        webhookRetryAttemptsTotal.inc({
+          event_type: event,
+          attempt: String(attempt),
+          status_code: String(lastStatusCode || 0),
+        });
+
+        // Check if we should retry based on error type
+        if (attempt < this.maxAttempts && isRetryableError(error, lastStatusCode)) {
+          const delayMs = calculateBackoffDelay(
+            this.baseDelayMs,
+            attempt,
+            this.maxDelayMs,
+            this.jitterFactor,
+          );
+          webhookBackoffDelaySeconds.observe({ event_type: event, attempt: String(attempt) }, delayMs / 1000);
+          this.logger.log(
+            `[webhook] retrying in ${delayMs}ms event=${event} transactionId=${payload.data.id} attempt=${attempt + 1}/${this.maxAttempts}`,
+          );
+          await this.sleepImpl(delayMs);
+        } else if (attempt < this.maxAttempts) {
+          // Non-retryable error, break early
+          this.logger.warn(
+            `[webhook] non-retryable error, stopping retries event=${event} transactionId=${payload.data.id}: ${lastError}`,
+          );
+          break;
+        }
       }
     }
 
     this.logger.error(
       `[webhook] delivery exhausted event=${event} transactionId=${payload.data.id}: ${lastError}`,
     );
+
+    // Track failed delivery
+    const durationSecs = (Date.now() - deliveryStart) / 1000;
+    webhookDeliveryDurationSeconds.observe({ event_type: event, status: "failed" }, durationSecs);
+    webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "failed" });
+
     return {
       status: "failed",
-      attempts: this.maxAttempts,
+      attempts: finalAttempt,
       statusCode: lastStatusCode,
       lastAttemptAt,
       deliveredAt: null,
@@ -364,9 +469,12 @@ export class WebhookService {
     let lastError: string | null = null;
     let lastStatusCode: number | undefined;
     let lastAttemptAt: Date | null = null;
+    let finalAttempt = 0;
+    const deliveryStart = Date.now();
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       lastAttemptAt = this.now();
+      finalAttempt = attempt;
       try {
         const response = await this.fetchImpl(this.webhookUrl, {
           method: "POST",
@@ -383,6 +491,13 @@ export class WebhookService {
         this.logger.log(
           `[webhook] delivered flat event=${event} transactionId=${payload.transaction_id} attempt=${attempt} compressed=${this.compress}`,
         );
+
+        const durationSecs = (Date.now() - deliveryStart) / 1000;
+        webhookDeliveryDurationSeconds.observe({ event_type: event, status: "delivered" }, durationSecs);
+        if (attempt > 1) {
+          webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "delivered" });
+        }
+
         return {
           status: "delivered",
           attempts: attempt,
@@ -397,17 +512,47 @@ export class WebhookService {
         this.logger.warn(
           `[webhook] delivery failed flat event=${event} transactionId=${payload.transaction_id} attempt=${attempt}/${this.maxAttempts}: ${lastError}`,
         );
-        if (attempt < this.maxAttempts)
-          await this.sleepImpl(this.baseDelayMs * 2 ** (attempt - 1));
+
+        webhookRetryAttemptsTotal.inc({
+          event_type: event,
+          attempt: String(attempt),
+          status_code: String(lastStatusCode || 0),
+        });
+
+        // Check if we should retry based on error type
+        if (attempt < this.maxAttempts && isRetryableError(error, lastStatusCode)) {
+          const delayMs = calculateBackoffDelay(
+            this.baseDelayMs,
+            attempt,
+            this.maxDelayMs,
+            this.jitterFactor,
+          );
+          webhookBackoffDelaySeconds.observe({ event_type: event, attempt: String(attempt) }, delayMs / 1000);
+          this.logger.log(
+            `[webhook] retrying in ${delayMs}ms flat event=${event} transactionId=${payload.transaction_id} attempt=${attempt + 1}/${this.maxAttempts}`,
+          );
+          await this.sleepImpl(delayMs);
+        } else if (attempt < this.maxAttempts) {
+          // Non-retryable error, break early
+          this.logger.warn(
+            `[webhook] non-retryable error, stopping retries flat event=${event} transactionId=${payload.transaction_id}: ${lastError}`,
+          );
+          break;
+        }
       }
     }
 
     this.logger.error(
       `[webhook] delivery exhausted flat event=${event} transactionId=${payload.transaction_id}: ${lastError}`,
     );
+
+    const durationSecs = (Date.now() - deliveryStart) / 1000;
+    webhookDeliveryDurationSeconds.observe({ event_type: event, status: "failed" }, durationSecs);
+    webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "failed" });
+
     return {
       status: "failed",
-      attempts: this.maxAttempts,
+      attempts: finalAttempt,
       statusCode: lastStatusCode,
       lastAttemptAt,
       deliveredAt: null,
@@ -456,6 +601,11 @@ export class WebhookService {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
         const attempts = entry.attempts + 1;
+        // For outbox, we don't have the status code easily available from the error
+        // We'll treat all errors as potentially retryable for the outbox processor
+        // since it runs asynchronously and we want to retry on transient failures
+        const isRetryable = attempts < entry.maxAttempts;
+        
         if (attempts >= entry.maxAttempts) {
           await outboxModel.update(entry.id, {
             status: "failed",
@@ -463,14 +613,30 @@ export class WebhookService {
             lastAttemptAt: now,
             errorMessage: `Exhausted retries: ${errorMessage}`,
           });
-        } else {
-          const backoffMs = this.baseDelayMs * Math.pow(2, attempts - 1);
+        } else if (isRetryable) {
+          const delayMs = calculateBackoffDelay(
+            this.baseDelayMs,
+            attempts,
+            this.maxDelayMs,
+            this.jitterFactor,
+          );
           await outboxModel.update(entry.id, {
             status: "pending",
             attempts,
             lastAttemptAt: now,
-            nextAttemptAt: new Date(now.getTime() + backoffMs),
+            nextAttemptAt: new Date(now.getTime() + delayMs),
             errorMessage,
+          });
+          this.logger.log(
+            `[webhook-outbox] retrying in ${delayMs}ms entry=${entry.id} attempt=${attempts + 1}/${entry.maxAttempts}`,
+          );
+        } else {
+          // Non-retryable error, mark as failed
+          await outboxModel.update(entry.id, {
+            status: "failed",
+            attempts,
+            lastAttemptAt: now,
+            errorMessage: `Non-retryable error: ${errorMessage}`,
           });
         }
         this.logger.warn(

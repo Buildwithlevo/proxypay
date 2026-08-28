@@ -176,6 +176,14 @@ export interface HealthCheckResponse {
   status: "ok";
   timestamp: string;
   gitHash?: string;
+  providers?: ProviderHealthSummary;
+}
+
+export interface ProviderHealthSummary {
+  overall: "healthy" | "degraded" | "down";
+  providers: Record<string, "up" | "down" | "unknown">;
+  healthyCount: number;
+  totalCount: number;
 }
 
 export interface ReadinessCheckResponse {

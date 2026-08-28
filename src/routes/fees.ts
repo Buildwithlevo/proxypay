@@ -5,6 +5,7 @@ import {
   CreateFeeConfigRequest,
   UpdateFeeConfigRequest,
 } from "../services/feeService";
+import { layeredCache } from "../services/layeredCache";
 import { requirePermission } from "../middleware/rbac";
 import { authenticateToken } from "../middleware/auth";
 import { calculateFeeForUser } from "../utils/fees";
@@ -594,6 +595,71 @@ router.get(
         {
           success: false,
           error: "Failed to fetch audit history",
+        },
+      );
+    }
+  },
+);
+
+/**
+ * POST /api/fees/cache/invalidate
+ * Manually invalidate all fee configuration caches (admin only)
+ */
+router.post(
+  "/cache/invalidate",
+  authenticateToken,
+  requirePermission("admin:system"),
+  logFeeAction("CACHE_INVALIDATE"),
+  async (_req: Request, res: Response) => {
+    try {
+      await layeredCache.invalidateAll();
+      const version = await layeredCache.bumpVersion();
+
+      res.json({
+        success: true,
+        message: "All fee configuration caches invalidated",
+        version,
+      });
+    } catch (error: any) {
+      console.error("Cache invalidation error:", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to invalidate fee caches",
+        {
+          success: false,
+          error: "Failed to invalidate fee caches",
+        },
+      );
+    }
+  },
+);
+
+/**
+ * GET /api/fees/cache/metrics
+ * Get cache hit/miss metrics (admin only)
+ */
+router.get(
+  "/cache/metrics",
+  authenticateToken,
+  requirePermission("admin:system"),
+  logFeeAction("CACHE_METRICS"),
+  async (_req: Request, res: Response) => {
+    try {
+      const metrics = layeredCache.getMetrics();
+      const version = await layeredCache.getVersion();
+
+      res.json({
+        success: true,
+        data: { ...metrics, version },
+      });
+    } catch (error: any) {
+      console.error("Cache metrics error:", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch cache metrics",
+        {
+          success: false,
+          error: "Failed to fetch cache metrics",
         },
       );
     }
