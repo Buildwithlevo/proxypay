@@ -58,14 +58,10 @@ function getCircuitKey(provider: string, operation: string): string {
   return `${provider}:${operation}`;
 }
 
+import { providerSettingsService } from "../services/providerSettingsService";
+
 async function getBreakerOptions(name: string, provider: string): Promise<CircuitBreakerOptions> {
-  const { providerSettingsService } = require("../services/providerSettingsService");
-  let settings;
-  try {
-    settings = await providerSettingsService.getProviderSettings(provider);
-  } catch {
-    console.warn(`Using default circuit breaker settings for ${provider}: provider settings unavailable`);
-  }
+  const settings = await providerSettingsService.getProviderSettings(provider);
 
   const timeoutMs = settings ? settings.timeout_ms : Number(process.env.PROVIDER_CIRCUIT_BREAKER_TIMEOUT_MS ?? 5_000);
   const volumeThreshold = settings ? settings.failure_threshold : Number(process.env.PROVIDER_CIRCUIT_BREAKER_VOLUME_THRESHOLD ?? 3);

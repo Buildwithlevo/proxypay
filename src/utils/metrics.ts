@@ -170,6 +170,12 @@ export const dbReplicaReadEnabled = new Gauge({
   registers: [register],
 });
 
+export const dbReplicaFailoversTotal = new Counter({
+  name: "db_replica_failovers_total",
+  help: "Total number of read query failovers from replica to primary",
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics
@@ -210,10 +216,161 @@ export const crossChainAnomalyTotal = new Counter({
   registers: [register],
 });
 
+// Sanctions List Monitoring Metrics
+export const sanctionsListLastUpdateTimestamp = new Gauge({
+  name: "sanctions_list_last_update_timestamp_seconds",
+  help: "Unix timestamp of the last successful sanctions list sync",
+  registers: [register],
+});
+
+export const sanctionsListRecordCount = new Gauge({
+  name: "sanctions_list_record_count",
+  help: "Number of records in the sanctions list after the last sync",
+  registers: [register],
+});
+
+export const sanctionsSyncFailuresTotal = new Counter({
+  name: "sanctions_sync_failures_total",
+  help: "Total number of failed sanctions list sync attempts",
+  registers: [register],
+});
+
 // System Heartbeat Metric
 export const systemHeartbeat = new Gauge({
   name: "system_heartbeat",
   help: "System heartbeat metric indicating baseline availability state (1=available, 0=unavailable)",
   labelNames: ["service"],
+  registers: [register],
+});
+
+// BullMQ Queue Depth Metrics
+export const queueWaitingJobs = new Gauge({
+  name: "bullmq_queue_waiting_jobs",
+  help: "Number of waiting jobs in the BullMQ queue",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+export const queueActiveJobs = new Gauge({
+  name: "bullmq_queue_active_jobs",
+  help: "Number of active jobs in the BullMQ queue",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+export const queueCompletedJobs = new Gauge({
+  name: "bullmq_queue_completed_jobs",
+  help: "Number of completed jobs in the BullMQ queue",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+export const queueFailedJobs = new Gauge({
+  name: "bullmq_queue_failed_jobs",
+  help: "Number of failed jobs in the BullMQ queue",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+export const queueDelayedJobs = new Gauge({
+  name: "bullmq_queue_delayed_jobs",
+  help: "Number of delayed jobs in the BullMQ queue",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+export const queueIsPaused = new Gauge({
+  name: "bullmq_queue_is_paused",
+  help: "Whether the BullMQ queue is paused (1=paused, 0=not paused)",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+// Worker Availability Metrics
+export const workerAvailable = new Gauge({
+  name: "bullmq_worker_available",
+  help: "Whether a worker is currently active for the queue (1=active, 0=inactive)",
+  labelNames: ["queue"],
+  registers: [register],
+});
+
+// Job Processing Metrics
+export const jobDurationSeconds = new Histogram({
+  name: "bullmq_job_duration_seconds",
+  help: "Duration of BullMQ job processing in seconds",
+  labelNames: ["queue", "job_name", "status"],
+  buckets: [0.1, 0.5, 1, 3, 5, 10, 30, 60, 120, 300],
+  registers: [register],
+});
+
+export const jobsTotal = new Counter({
+  name: "bullmq_jobs_total",
+  help: "Total number of BullMQ jobs processed",
+  labelNames: ["queue", "job_name", "status"],
+  registers: [register],
+});
+
+// Transaction Type Classifier Metrics (ML auto-categorisation)
+export const transactionClassificationsTotal = new Counter({
+  name: "transaction_classifications_total",
+  help: "Total number of transactions classified by the ML model",
+  labelNames: ["category"],
+  registers: [register],
+});
+
+export const transactionClassificationConfidence = new Histogram({
+  name: "transaction_classification_confidence",
+  help: "Confidence scores of ML transaction classifications",
+  buckets: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99],
+  registers: [register],
+});
+
+export const transactionClassifierAccuracy = new Gauge({
+  name: "transaction_classifier_accuracy",
+  help: "Accuracy of the transaction type classifier evaluated on human-labelled samples (0–1)",
+  registers: [register],
+});
+
+export const transactionClassifierFeedbackTotal = new Counter({
+  name: "transaction_classifier_feedback_total",
+  help: "Total number of human feedback corrections submitted for the classifier",
+  labelNames: ["corrected_category"],
+  registers: [register],
+});
+
+export const transactionClassifierTrainingSamples = new Gauge({
+  name: "transaction_classifier_training_samples",
+  help: "Number of labelled training samples stored for the transaction classifier",
+  registers: [register],
+});
+
+// Webhook Retry Metrics
+export const webhookRetryAttemptsTotal = new Counter({
+  name: "webhook_retry_attempts_total",
+  help: "Total number of webhook retry attempts",
+  labelNames: ["event_type", "attempt", "status_code"],
+  registers: [register],
+});
+
+export const webhookDeliveryDurationSeconds = new Histogram({
+  name: "webhook_delivery_duration_seconds",
+  help: "Duration of webhook delivery attempts in seconds",
+  labelNames: ["event_type", "status"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30],
+  registers: [register],
+});
+
+export const webhookDeliveryRetriesTotal = new Counter({
+  name: "webhook_delivery_retries_total",
+  help: "Total number of webhook deliveries that required retries",
+  labelNames: ["event_type", "final_status"],
+  registers: [register],
+});
+
+export const webhookBackoffDelaySeconds = new Histogram({
+  name: "webhook_backoff_delay_seconds",
+  help: "Backoff delay applied between webhook retry attempts in seconds",
+  labelNames: ["event_type", "attempt"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
   registers: [register],
 });

@@ -1,11 +1,16 @@
 import { Pool, QueryConfig, QueryResult, QueryResultRow, PoolClient } from "pg";
+import { createHash } from "crypto";
 import { auditService } from "../services/auditlogService";
 import { isReadOnlyQuery } from "../utils/readOnlyDetector";
-import { dbReplicaLagSeconds, dbReplicaReadEnabled } from "../utils/metrics";
+import { dbReplicaLagSeconds, dbReplicaReadEnabled, dbReplicaFailoversTotal } from "../utils/metrics";
 import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
 
 const DR_DATABASE_URL = process.env.DR_DATABASE_URL;
 const isDRMode = (): boolean => !!DR_DATABASE_URL;
+
+// Expose DR mode as a Prometheus gauge so dashboards/alerting can react to
+// failover without parsing logs. 1 = failover active, 0 = standby/normal.
+dbDrMode.set(isDRMode() ? 1 : 0);
 
 const productionSsl =
   process.env.NODE_ENV === "production" ? { rejectUnauthorized: true } : undefined;
@@ -80,15 +85,56 @@ function sanitizeParams(params: any[]): any[] {
 /**
  * Logs slow queries with sanitized information
  */
-function logSlowQuery(query: string, duration: number, params?: any[]): void {
+type SlowQueryDetails = {
+  pool?: "primary" | "replica";
+  status?: "success" | "error";
+  rowCount?: number | null;
+  error?: unknown;
+};
+
+function getQueryOperation(query: string): string {
+  return query.trim().split(/\s+/, 1)[0]?.toUpperCase() || "UNKNOWN";
+}
+
+function getQueryFingerprint(query: string): string {
+  const normalizedQuery = query.trim().replace(/\s+/g, " ").toLowerCase();
+  return createHash("sha256").update(normalizedQuery).digest("hex").slice(0, 16);
+}
+
+function getErrorDetails(error: unknown): { message: string; code?: string } | undefined {
+  if (!error || typeof error !== "object") return undefined;
+
+  const databaseError = error as { message?: unknown; code?: unknown };
+  return {
+    message: databaseError.message ? String(databaseError.message) : "Unknown database error",
+    ...(databaseError.code ? { code: String(databaseError.code) } : {}),
+  };
+}
+
+function logSlowQuery(
+  query: string,
+  duration: number,
+  params?: any[],
+  details: SlowQueryDetails = {},
+): void {
   if (!ENABLE_SLOW_QUERY_LOGGING) return;
 
+  const sanitizedQuery = sanitizeQuery(query);
   const logEntry = {
     type: "slow_query",
     duration: Math.round(duration),
+    duration_ms: Math.round(duration),
     threshold: SLOW_QUERY_THRESHOLD_MS,
-    query: sanitizeQuery(query),
+    threshold_ms: SLOW_QUERY_THRESHOLD_MS,
+    query: sanitizedQuery,
+    query_fingerprint: getQueryFingerprint(query),
+    query_operation: getQueryOperation(query),
+    query_length: query.length,
     params: params ? sanitizeParams(params) : undefined,
+    pool: details.pool || "primary",
+    status: details.status || "success",
+    row_count: details.rowCount,
+    error: getErrorDetails(details.error),
     timestamp: new Date().toISOString(),
   };
 
@@ -117,7 +163,11 @@ class SlowQueryPool extends Pool {
       const durationMs = Number(endTime - startTime) / 1e6;
 
       if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
-        logSlowQuery(queryString, durationMs, queryParams);
+        logSlowQuery(queryString, durationMs, queryParams, {
+          pool: "primary",
+          status: "success",
+          rowCount: result.rowCount,
+        });
       }
 
       return result;
@@ -126,7 +176,11 @@ class SlowQueryPool extends Pool {
       const durationMs = Number(endTime - startTime) / 1e6;
 
       if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
-        logSlowQuery(queryString, durationMs, queryParams);
+        logSlowQuery(queryString, durationMs, queryParams, {
+          pool: "primary",
+          status: "error",
+          error,
+        });
       }
 
       throw error;
@@ -167,7 +221,11 @@ const originalPoolQuery = pool.query.bind(pool);
     const endTime = process.hrtime.bigint();
     const durationMs = Number(endTime - startTime) / 1e6;
     if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
-      logSlowQuery(queryString, durationMs, queryParams);
+      logSlowQuery(queryString, durationMs, queryParams, {
+        pool: "primary",
+        status: "success",
+        rowCount: result.rowCount,
+      });
     }
 
     // PII Audit Interceptor
@@ -205,7 +263,11 @@ const originalPoolQuery = pool.query.bind(pool);
     const endTime = process.hrtime.bigint();
     const durationMs = Number(endTime - startTime) / 1e6;
     if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
-      logSlowQuery(queryString, durationMs, queryParams);
+      logSlowQuery(queryString, durationMs, queryParams, {
+        pool: "primary",
+        status: "error",
+        error,
+      });
     }
     throw error;
   }
@@ -296,9 +358,11 @@ async function refreshReplicaStatus(idx: number): Promise<void> {
     const result = await client.query<{ lag_seconds: number | null }>(query);
     lagSeconds = result.rows?.[0]?.lag_seconds ?? null;
     healthy = true;
+    markReplicaHealthy(url);
   } catch (error) {
     healthy = false;
     lagSeconds = null;
+    markReplicaUnhealthy(url, error instanceof Error ? error.message : String(error));
     console.warn(`Replica health check failed for ${url}:`, error);
   } finally {
     client?.release();
@@ -326,13 +390,15 @@ function startReplicaLagMonitor(): void {
 startReplicaLagMonitor();
 
 /**
- * Execute a read-only SQL query against a replica pool if available.
- * If the replica is unreachable (pool error or connection failure) the query
- * automatically falls over to the primary pool so callers are unaffected.
+ * Execute a read-only SQL query against a replica pool with retry and fallback.
+ * If the replica fails, retries with exponential backoff and falls back to primary.
  *
  * @param text   - The parameterised SQL query string
  * @param params - Optional query parameters
  */
+const REPLICA_RETRY_ATTEMPTS = parseInt(process.env.REPLICA_RETRY_ATTEMPTS || "2", 10);
+const REPLICA_RETRY_BASE_MS = parseInt(process.env.REPLICA_RETRY_BASE_MS || "100", 10);
+
 export async function queryRead<T extends import("pg").QueryResultRow = any>(
   text: string,
   params?: unknown[],
@@ -340,20 +406,29 @@ export async function queryRead<T extends import("pg").QueryResultRow = any>(
   const replicaPool = getNextReplicaPool();
 
   if (replicaPool) {
-    let client: PoolClient | null = null;
-    try {
-      client = await replicaPool.connect();
-      const result = await client.query<T>(text, params);
-      return result;
-    } catch (err) {
-      // Log replica failure and fall back to primary
-      console.warn("Read replica query failed, falling back to primary:", err);
-    } finally {
-      client?.release();
+    for (let attempt = 0; attempt <= REPLICA_RETRY_ATTEMPTS; attempt++) {
+      let client: PoolClient | null = null;
+      try {
+        client = await replicaPool.connect();
+        const result = await client.query<T>(text, params);
+        return result;
+      } catch (err) {
+        console.warn(
+          `Read replica query failed (attempt ${attempt + 1}/${REPLICA_RETRY_ATTEMPTS + 1}):`,
+          err,
+        );
+        if (attempt < REPLICA_RETRY_ATTEMPTS) {
+          const delayMs = REPLICA_RETRY_BASE_MS * Math.pow(2, attempt);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      } finally {
+        client?.release();
+      }
     }
+    dbReplicaFailoversTotal.inc();
+    console.warn("All replica attempts exhausted, falling back to primary");
   }
 
-  // Fall back: use primary pool (which goes through PgBouncer)
   return pool.query<T>(text, params);
 }
 
@@ -405,6 +480,23 @@ export async function checkReplicaHealth(): Promise<
       return { url, healthy, enabled, lagSeconds };
     }),
   );
+}
+
+/**
+ * Enable or disable a replica by index (0-based).
+ * Useful for manual failover via admin API.
+ */
+export function setReplicaEnabled(index: number, enabled: boolean): boolean {
+  if (index < 0 || index >= replicaStatuses.length) return false;
+  replicaStatuses[index].enabled = enabled;
+  return true;
+}
+
+/**
+ * Get current replica statuses (read-only snapshot).
+ */
+export function getReplicaStatuses(): ReplicaStatus[] {
+  return replicaStatuses.map((s) => ({ ...s }));
 }
 
 /**
@@ -538,6 +630,8 @@ export async function getPoolStats(): Promise<{
   replicas: Array<{
     url: string;
     healthy: boolean;
+    enabled: boolean;
+    lagSeconds: number | null;
   }>;
 }> {
   const replicaStats = await checkReplicaHealth();
@@ -551,5 +645,45 @@ export async function getPoolStats(): Promise<{
         : "Primary database - all critical writes",
     },
     replicas: replicaStats,
+  };
+}
+
+/**
+ * Comprehensive connection pool statistics for monitoring.
+ * Returns pool metrics from the primary pool and all replica pools.
+ */
+export function getConnectionPoolStatistics(): {
+  primary: {
+    totalCount: number;
+    idleCount: number;
+    waitingCount: number;
+    maxConnections: number;
+  };
+  replicas: Array<{
+    url: string;
+    totalCount: number;
+    idleCount: number;
+    waitingCount: number;
+    enabled: boolean;
+    healthy: boolean;
+    lagSeconds: number | null;
+  }>;
+} {
+  return {
+    primary: {
+      totalCount: pool.totalCount,
+      idleCount: pool.idleCount,
+      waitingCount: pool.waitingCount,
+      maxConnections: pool.options?.max ?? 100,
+    },
+    replicas: replicaUrls.map((url, idx) => ({
+      url,
+      totalCount: replicaPools[idx]?.totalCount ?? 0,
+      idleCount: replicaPools[idx]?.idleCount ?? 0,
+      waitingCount: replicaPools[idx]?.waitingCount ?? 0,
+      enabled: replicaStatuses[idx]?.enabled ?? false,
+      healthy: replicaStatuses[idx]?.healthy ?? false,
+      lagSeconds: replicaStatuses[idx]?.lagSeconds ?? null,
+    })),
   };
 }

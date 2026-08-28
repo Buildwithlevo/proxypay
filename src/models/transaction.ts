@@ -1,6 +1,6 @@
 import { queryRead, queryWrite } from "../config/database";
 import { generateReferenceNumber } from "../utils/referenceGenerator";
-import { encrypt, decrypt } from "../utils/encryption";
+import { encrypt, decrypt, hashSearchValue } from "../utils/encryption";
 import { WebSocketManager } from "../websocket";
 import { getRedisPubSub } from "../graphql/redisPubSub";
 import { CachedTransactionInvalidation } from "../services/cachedTransactionService";
@@ -66,6 +66,13 @@ interface DecodedTransactionCursor {
 const MAX_TAGS = 10;
 const TAG_REGEX = /^[a-z0-9-]+$/;
 const MAX_METADATA_BYTES = 10240;
+
+function phoneSearchTokens(phoneNumber: string): string[] {
+  const normalized = phoneNumber.replace(/^\+/, "");
+  return Array.from({ length: normalized.length }, (_, index) =>
+    hashSearchValue(normalized.slice(index)),
+  );
+}
 
 const TRANSACTION_SELECT_COLUMNS = `
   id,
@@ -227,10 +234,10 @@ export class TransactionModel {
       `INSERT INTO transactions (
         reference_number, provider_reference, type, amount, currency,
         original_amount, converted_amount, phone_number, provider,
-        stellar_address, status, tags, notes, user_id,
+        phone_search_tokens, stellar_address, status, tags, notes, user_id,
         idempotency_key, idempotency_expires_at, metadata, location_metadata
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
       ) RETURNING *`,
       [
         ref,
@@ -242,6 +249,7 @@ export class TransactionModel {
         data.convertedAmount ?? null,
         encrypt(data.phoneNumber),
         data.provider,
+        phoneSearchTokens(data.phoneNumber),
         encrypt(data.stellarAddress), // ✅ FIXED BUG HERE
         data.status,
         data.tags ?? [],
@@ -371,6 +379,7 @@ export class TransactionModel {
     await ws?.broadcastTransactionUpdate({
       id,
       status,
+      type: row.type,
       userId: row.user_id,
     });
   }
@@ -764,20 +773,21 @@ export class TransactionModel {
     const capped = Math.min(Math.max(limit, 1), 100);
     const off = Math.max(offset, 0);
 
+    const normalized = phoneNumber.replace(/^\+/, "");
     const result = await queryRead(
-      `SELECT ${TRANSACTION_SELECT_COLUMNS}
+      `SELECT ${TRANSACTION_SELECT_COLUMNS}, COUNT(*) OVER()::int AS "total"
         FROM transactions
-        ORDER BY created_at DESC
-        LIMIT $1 OFFSET $2`,
-      [capped, off],
+        WHERE phone_search_tokens @> ARRAY[$1]::text[]
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2 OFFSET $3`,
+      [hashSearchValue(normalized), capped, off],
     );
 
     const mapped = result.rows
       .map((r: any) => mapTransactionRow(r))
-      .filter((t: any): t is Transaction => t !== null)
-      .filter((t: any) => t.phoneNumber.includes(phoneNumber));
+      .filter((t: any): t is Transaction => t !== null);
 
-    const total = mapped.length;
+    const total = Number(result.rows[0]?.total ?? 0);
 
     return { transactions: mapped, total };
   }
