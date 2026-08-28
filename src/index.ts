@@ -108,11 +108,12 @@ import providerStatusRouter from "./routes/providerStatus";
 import providerHealthRouter from "./routes/providerHealthRoutes";
 import kycWebhookRouter from "./routes/kycWebhookRoutes";
 import twoFactorRouter from "./routes/twoFactorRoutes";
-import transactionMetadataRouter from "./routes/transactionMetadataRoutes";
+import { transactionMetadataRouter } from "./routes/transactionMetadataRoutes";
 import healthProvidersRouter from "./routes/healthProviders";
 import adminReplicasRouter from "./routes/adminReplicas";
 import connectionDashboardRouter from "./routes/connectionDashboard";
 import { transactionStreamRoutes } from "./routes/stream";
+import { batchOperationRoutes } from "./routes/batchOperations";
 import {
   startHeartbeatService,
   stopHeartbeatService,
@@ -518,6 +519,8 @@ app.use("/api/transactions/metadata", transactionMetadataRouter);
 app.use("/api/fraud", fraudRoutes);
 // #404 – 2FA Multi-method
 app.use("/api/auth/2fa", twoFactorRouter);
+// #392 – Batch Import Status Tracking
+app.use("/api/batch-operations", batchOperationRoutes);
 // #358 – Provider Health Aggregation
 app.use("/api/health", healthProvidersRouter);
 // #356 – Read Replica Health Admin
