@@ -1,8 +1,10 @@
 
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
+import crypto from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import { RefreshTokenFamilyModel } from "../models/refreshTokenFamily";
+import { redisClient } from "../config/redis";
 
 dotenv.config();
 
@@ -22,6 +24,8 @@ export interface JWTImpersonationClaim {
 
 interface GenerateTokenOptions {
   expiresIn?: string | number;
+  sessionId?: string;
+  binding?: string;
 }
 
 function getJwtSecret(): string {
@@ -38,6 +42,8 @@ export interface JWTPayload {
   role?: string;
   impersonation?: JWTImpersonationClaim;
   tokenVersion?: number;
+  sessionId?: string;
+  binding?: string;
   iat?: number;
   exp?: number;
 }
@@ -47,6 +53,8 @@ export interface RefreshTokenPayload {
   familyId: string;
   tokenId: string;
   parentTokenId?: string;
+  sessionId?: string;
+  binding?: string;
   iat?: number;
   exp?: number;
 }
@@ -62,9 +70,42 @@ export function generateToken(
   options?: GenerateTokenOptions,
 ): string {
   const expiresIn = options?.expiresIn ?? JWT_EXPIRES_IN;
-  return jwt.sign(payload, getJwtSecret(), {
+  return jwt.sign({
+    ...payload,
+    ...(options?.sessionId ? { sessionId: options.sessionId } : {}),
+    ...(options?.binding ? { binding: options.binding } : {}),
+  }, getJwtSecret(), {
     expiresIn: typeof expiresIn === 'string' ? expiresIn : expiresIn,
   } as jwt.SignOptions);
+}
+
+export function createSessionBinding(deviceId?: string, userAgent?: string): string {
+  return crypto.createHash("sha256").update(`${deviceId ?? ""}:${userAgent ?? ""}`).digest("hex");
+}
+
+const sessionKey = (sessionId: string) => `jwt:session:${sessionId}`;
+const userSessionsKey = (userId: string) => `user:${userId}:jwt_sessions`;
+
+export async function registerJwtSession(
+  userId: string,
+  sessionId: string,
+  binding: string,
+  expiresAt: number,
+): Promise<void> {
+  if (!redisClient.isOpen) return;
+  const maxSessions = Math.max(1, Number(process.env.JWT_MAX_CONCURRENT_SESSIONS ?? 5));
+  const ttl = Math.max(1, expiresAt - Math.floor(Date.now() / 1000));
+  const sessionsKey = userSessionsKey(userId);
+
+  await redisClient.set(sessionKey(sessionId), JSON.stringify({ userId, binding }), { EX: ttl });
+  await redisClient.zAdd(sessionsKey, [{ score: Date.now(), value: sessionId }]);
+  await redisClient.expire(sessionsKey, ttl);
+
+  const sessions = await redisClient.zRange(sessionsKey, 0, -1);
+  for (const oldSessionId of sessions.slice(0, Math.max(0, sessions.length - maxSessions))) {
+    await redisClient.del(sessionKey(oldSessionId));
+    await redisClient.zRem(sessionsKey, oldSessionId);
+  }
 }
 
 /**
@@ -74,7 +115,12 @@ export function generateToken(
  * @param parentTokenId - Parent token ID (if rotating)
  * @returns Signed refresh token
  */
-export async function generateRefreshToken(userId: string, familyId?: string, parentTokenId?: string): Promise<string> {
+export async function generateRefreshToken(
+  userId: string,
+  familyId?: string,
+  parentTokenId?: string,
+  session?: { sessionId: string; binding: string },
+): Promise<string> {
   const tokenId = uuidv4();
   const famId = familyId || uuidv4();
   const payload: RefreshTokenPayload = {
@@ -82,6 +128,7 @@ export async function generateRefreshToken(userId: string, familyId?: string, pa
     familyId: famId,
     tokenId,
     parentTokenId,
+    ...session,
   };
   const token = jwt.sign(payload, getJwtSecret(), {
     expiresIn: REFRESH_TOKEN_EXPIRES_IN,
