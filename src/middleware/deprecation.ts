@@ -25,7 +25,8 @@
  */
 
 import { Request, Response, NextFunction, RequestHandler } from 'express';
-import logger from '../services/logger';
+import logger from '../utils/logger';
+import { deprecatedEndpointRequestsTotal, register } from '../utils/metrics';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -97,6 +98,109 @@ export class DeprecationRegistry {
   static clear(): void {
     this.entries = [];
   }
+
+  /**
+   * Return the full deprecation timeline for the admin dashboard.
+   * Each entry is enriched with computed status (announced / sunset-passed)
+   * and days remaining until the sunset date.
+   */
+  static getTimeline(): Array<{
+    path: string;
+    method: string;
+    deprecatedSince: string | undefined;
+    sunsetDate: string | undefined;
+    replacement: string | undefined;
+    reason: string | undefined;
+    status: 'announced' | 'sunset-passed' | 'no-sunset';
+    daysUntilSunset: number | null;
+  }> {
+    const now = Date.now();
+    return this.entries.map((entry) => {
+      const sunsetTime = entry.sunsetDate?.getTime();
+      let status: 'announced' | 'sunset-passed' | 'no-sunset' = 'no-sunset';
+      let daysUntilSunset: number | null = null;
+
+      if (sunsetTime !== undefined) {
+        status = sunsetTime <= now ? 'sunset-passed' : 'announced';
+        daysUntilSunset = Math.ceil((sunsetTime - now) / 86_400_000);
+      }
+
+      return {
+        path: entry.path instanceof RegExp ? entry.path.source : entry.path,
+        method: entry.method ?? 'ALL',
+        deprecatedSince: entry.deprecatedSince,
+        sunsetDate: entry.sunsetDate?.toISOString().split('T')[0],
+        replacement: entry.replacement,
+        reason: entry.reason,
+        status,
+        daysUntilSunset,
+      };
+    });
+  }
+
+  /**
+   * Aggregate current Prometheus usage counters for every registered endpoint.
+   * Useful for the admin dashboard to see which deprecated endpoints are still
+   * receiving traffic and how close they are to sunset.
+   */
+  static async getUsageStats(): Promise<
+    Array<{
+      path: string;
+      method: string;
+      replacement: string | undefined;
+      sunsetDate: string | undefined;
+      requests: number;
+    }>
+  > {
+    const metrics = await register.getMetricsAsJSON();
+    const counter = metrics.find((m) => m.name === 'deprecated_endpoint_requests_total');
+    const values = counter?.values ?? [];
+
+    return this.entries.map((entry) => {
+      const path = entry.path instanceof RegExp ? entry.path.source : entry.path;
+      const method = entry.method ?? 'ALL';
+      const replacement = entry.replacement;
+      // The counter is labelled with the request's concrete path, so aggregate
+      // all series that share this deprecation's replacement route.
+      const requests = values
+        .filter((v) => v.labels?.replacement === (replacement ?? ''))
+        .reduce((sum, v) => sum + (typeof v.value === 'number' ? v.value : 0), 0);
+
+      return {
+        path,
+        method,
+        replacement,
+        sunsetDate: entry.sunsetDate?.toISOString().split('T')[0],
+        requests,
+      };
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Monitoring helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Records usage of a deprecated endpoint against the
+ * `deprecated_endpoint_requests_total` Prometheus counter.
+ *
+ * The counter is labelled with the resolved method, the concrete request path,
+ * the replacement target, and the sunset date so operators can identify which
+ * deprecated surfaces are still hot.
+ */
+export function recordDeprecatedUsage(opts: {
+  method: string;
+  path: string;
+  replacement?: string;
+  sunset?: Date;
+}): void {
+  deprecatedEndpointRequestsTotal.inc({
+    method: opts.method.toUpperCase(),
+    route: opts.path,
+    replacement: opts.replacement ?? '',
+    sunset: opts.sunset?.toISOString().split('T')[0] ?? '',
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +297,13 @@ export const deprecationMiddleware: RequestHandler = (
       replacement: entry.replacement,
       deprecatedSince: entry.deprecatedSince,
       reason: entry.reason,
+    });
+
+    recordDeprecatedUsage({
+      method: req.method,
+      path: req.path,
+      replacement: entry.replacement,
+      sunset: entry.sunsetDate,
     });
 
     logger.warn({

@@ -2,7 +2,17 @@ import { Pool, QueryConfig, QueryResult, QueryResultRow, PoolClient } from "pg";
 import { createHash } from "crypto";
 import { auditService } from "../services/auditlogService";
 import { isReadOnlyQuery } from "../utils/readOnlyDetector";
-import { dbReplicaLagSeconds, dbReplicaReadEnabled, dbReplicaFailoversTotal } from "../utils/metrics";
+import {
+  dbReplicaLagSeconds,
+  dbReplicaReadEnabled,
+  dbReplicaFailoversTotal,
+  dbPoolUtilization,
+  dbPoolTotalConnections,
+  dbPoolIdleConnections,
+  dbPoolWaitingConnections,
+  dbPoolMaxConnections,
+  dbPoolConfig,
+} from "../utils/metrics";
 import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
 
 const DR_DATABASE_URL = process.env.DR_DATABASE_URL;
@@ -189,15 +199,84 @@ class SlowQueryPool extends Pool {
 }
 
 /**
+ * Connection pool configuration, sourced from environment variables so that
+ * different workload profiles can tune connection behaviour without code
+ * changes. Defaults preserve the previous hard-coded behaviour.
+ */
+function readPoolNumber(raw: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(raw || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const DEFAULT_POOL_MAX = 1000;
+const DEFAULT_POOL_IDLE_TIMEOUT_MS = 30000;
+const DEFAULT_POOL_CONNECTION_TIMEOUT_MS = 500;
+
+const DB_POOL_MAX = readPoolNumber(process.env.DB_POOL_MAX, DEFAULT_POOL_MAX);
+const DB_POOL_MIN = readPoolNumber(process.env.DB_POOL_MIN, 0);
+const DB_POOL_IDLE_TIMEOUT_MS = readPoolNumber(
+  process.env.DB_POOL_IDLE_TIMEOUT_MS,
+  DEFAULT_POOL_IDLE_TIMEOUT_MS,
+);
+const DB_POOL_CONNECTION_TIMEOUT_MS = readPoolNumber(
+  process.env.DB_POOL_CONNECTION_TIMEOUT_MS,
+  DEFAULT_POOL_CONNECTION_TIMEOUT_MS,
+);
+
+const DB_WRITE_POOL_MAX = readPoolNumber(
+  process.env.DB_WRITE_POOL_MAX,
+  DEFAULT_POOL_MAX,
+);
+const DB_WRITE_POOL_MIN = readPoolNumber(process.env.DB_WRITE_POOL_MIN, 0);
+const DB_WRITE_POOL_IDLE_TIMEOUT_MS = readPoolNumber(
+  process.env.DB_WRITE_POOL_IDLE_TIMEOUT_MS,
+  DEFAULT_POOL_IDLE_TIMEOUT_MS,
+);
+const DB_WRITE_POOL_CONNECTION_TIMEOUT_MS = readPoolNumber(
+  process.env.DB_WRITE_POOL_CONNECTION_TIMEOUT_MS,
+  DEFAULT_POOL_CONNECTION_TIMEOUT_MS,
+);
+
+const DB_REPLICA_POOL_MAX = readPoolNumber(process.env.DB_REPLICA_POOL_MAX, 100);
+const DB_REPLICA_POOL_IDLE_TIMEOUT_MS = readPoolNumber(
+  process.env.DB_REPLICA_POOL_IDLE_TIMEOUT_MS,
+  DEFAULT_POOL_IDLE_TIMEOUT_MS,
+);
+const DB_REPLICA_POOL_CONNECTION_TIMEOUT_MS = readPoolNumber(
+  process.env.DB_REPLICA_POOL_CONNECTION_TIMEOUT_MS,
+  DEFAULT_POOL_CONNECTION_TIMEOUT_MS,
+);
+
+const DB_POOL_MONITOR_INTERVAL_MS = readPoolNumber(
+  process.env.DB_POOL_MONITOR_INTERVAL_MS,
+  5000,
+);
+
+/**
  * Primary connection pool – now routes through PgBouncer for transaction-level pooling
  * This significantly reduces the number of direct connections to Postgres
  * (INSERT, UPDATE, DELETE) and read operations when no replica is available.
  */
 export const pool = new Pool({
   connectionString: IS_SANDBOX ? (SANDBOX_DATABASE_URL || DATABASE_URL) : DATABASE_URL,
-  max: 1000,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 500,
+  max: DB_POOL_MAX,
+  min: DB_POOL_MIN,
+  idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT_MS,
+  ssl: productionSsl,
+});
+
+/**
+ * Dedicated write connection pool – handles INSERT / UPDATE / DELETE operations.
+ * Separating writes from reads lets operators size the two pools independently
+ * for their workload (e.g. small writer pool + large reader pool, or vice-versa).
+ */
+export const writePool = new Pool({
+  connectionString: IS_SANDBOX ? (SANDBOX_DATABASE_URL || DATABASE_URL) : DATABASE_URL,
+  max: DB_WRITE_POOL_MAX,
+  min: DB_WRITE_POOL_MIN,
+  idleTimeoutMillis: DB_WRITE_POOL_IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: DB_WRITE_POOL_CONNECTION_TIMEOUT_MS,
   ssl: productionSsl,
 });
 
@@ -312,9 +391,9 @@ const replicaPools: Pool[] = replicaUrls.map(
   (url) =>
     new Pool({
       connectionString: url,
-      max: 50,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 500,
+      max: DB_REPLICA_POOL_MAX,
+      idleTimeoutMillis: DB_REPLICA_POOL_IDLE_TIMEOUT_MS,
+      connectionTimeoutMillis: DB_REPLICA_POOL_CONNECTION_TIMEOUT_MS,
       ssl: productionSsl,
     }),
 );
@@ -433,8 +512,8 @@ export async function queryRead<T extends import("pg").QueryResultRow = any>(
 }
 
 /**
- * Execute a write SQL query (INSERT / UPDATE / DELETE) against the primary pool.
- * All writes now route through PgBouncer via the primary pool connection.
+ * Execute a write SQL query (INSERT / UPDATE / DELETE) against the dedicated
+ * write connection pool, which routes through PgBouncer via the primary DB.
  *
  * @param text   - The parameterised SQL query string
  * @param params - Optional query parameters
@@ -443,7 +522,7 @@ export async function queryWrite<T extends import("pg").QueryResultRow = any>(
   text: string,
   params?: unknown[],
 ): Promise<import("pg").QueryResult<T>> {
-  return pool.query<T>(text, params);
+  return writePool.query<T>(text, params);
 }
 
 /**
@@ -650,40 +729,176 @@ export async function getPoolStats(): Promise<{
 
 /**
  * Comprehensive connection pool statistics for monitoring.
- * Returns pool metrics from the primary pool and all replica pools.
+ * Returns pool metrics from the primary, write and replica pools.
  */
-export function getConnectionPoolStatistics(): {
-  primary: {
-    totalCount: number;
-    idleCount: number;
-    waitingCount: number;
-    maxConnections: number;
-  };
-  replicas: Array<{
-    url: string;
-    totalCount: number;
-    idleCount: number;
-    waitingCount: number;
-    enabled: boolean;
-    healthy: boolean;
-    lagSeconds: number | null;
-  }>;
-} {
-  return {
-    primary: {
-      totalCount: pool.totalCount,
-      idleCount: pool.idleCount,
-      waitingCount: pool.waitingCount,
-      maxConnections: pool.options?.max ?? 100,
-    },
-    replicas: replicaUrls.map((url, idx) => ({
-      url,
-      totalCount: replicaPools[idx]?.totalCount ?? 0,
-      idleCount: replicaPools[idx]?.idleCount ?? 0,
-      waitingCount: replicaPools[idx]?.waitingCount ?? 0,
-      enabled: replicaStatuses[idx]?.enabled ?? false,
-      healthy: replicaStatuses[idx]?.healthy ?? false,
-      lagSeconds: replicaStatuses[idx]?.lagSeconds ?? null,
-    })),
+export interface PoolSnapshot {
+  totalCount: number;
+  idleCount: number;
+  waitingCount: number;
+  maxConnections: number;
+  utilization: number;
+  config: {
+    min: number;
+    idleTimeoutMillis: number;
+    connectionTimeoutMillis: number;
   };
 }
+
+function snapshotPool(
+  p: Pool,
+  maxDefaults: {
+    min: number;
+    idleTimeoutMillis: number;
+    connectionTimeoutMillis: number;
+  },
+): PoolSnapshot {
+  const maxConnections = (p.options?.max ?? DEFAULT_POOL_MAX) as number;
+  const totalCount = p.totalCount ?? 0;
+  const utilization = maxConnections > 0 ? Math.min(1, totalCount / maxConnections) : 0;
+  return {
+    totalCount,
+    idleCount: p.idleCount ?? 0,
+    waitingCount: p.waitingCount ?? 0,
+    maxConnections,
+    utilization: Number(utilization.toFixed(4)),
+    config: {
+      min: (p.options?.min ?? maxDefaults.min) as number,
+      idleTimeoutMillis:
+        (p.options?.idleTimeoutMillis ?? maxDefaults.idleTimeoutMillis) as number,
+      connectionTimeoutMillis:
+        (p.options?.connectionTimeoutMillis ??
+          maxDefaults.connectionTimeoutMillis) as number,
+    },
+  };
+}
+
+export function getConnectionPoolStatistics(): {
+  primary: PoolSnapshot;
+  write: PoolSnapshot;
+  replicas: Array<
+    PoolSnapshot & {
+      url: string;
+      enabled: boolean;
+      healthy: boolean;
+      lagSeconds: number | null;
+    }
+  >;
+} {
+  return {
+    primary: snapshotPool(pool, {
+      min: DB_POOL_MIN,
+      idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT_MS,
+      connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT_MS,
+    }),
+    write: snapshotPool(writePool, {
+      min: DB_WRITE_POOL_MIN,
+      idleTimeoutMillis: DB_WRITE_POOL_IDLE_TIMEOUT_MS,
+      connectionTimeoutMillis: DB_WRITE_POOL_CONNECTION_TIMEOUT_MS,
+    }),
+    replicas: replicaUrls.map((url, idx) => {
+      const snap = replicaPools[idx]
+        ? snapshotPool(replicaPools[idx], {
+            min: 0,
+            idleTimeoutMillis: DB_REPLICA_POOL_IDLE_TIMEOUT_MS,
+            connectionTimeoutMillis: DB_REPLICA_POOL_CONNECTION_TIMEOUT_MS,
+          })
+        : null;
+      return {
+        url,
+        totalCount: snap?.totalCount ?? 0,
+        idleCount: snap?.idleCount ?? 0,
+        waitingCount: snap?.waitingCount ?? 0,
+        maxConnections: snap?.maxConnections ?? 0,
+        utilization: snap?.utilization ?? 0,
+        config: snap?.config ?? {
+          min: 0,
+          idleTimeoutMillis: 0,
+          connectionTimeoutMillis: 0,
+        },
+        enabled: replicaStatuses[idx]?.enabled ?? false,
+        healthy: replicaStatuses[idx]?.healthy ?? false,
+        lagSeconds: replicaStatuses[idx]?.lagSeconds ?? null,
+      };
+    }),
+  };
+}
+
+/**
+ * Record current pool utilization into Prometheus gauges so dashboards and
+ * alerting can react to connection pressure without polling an endpoint.
+ */
+function updatePoolMetrics(): void {
+  const primary = snapshotPool(pool, {
+    min: DB_POOL_MIN,
+    idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT_MS,
+    connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT_MS,
+  });
+  dbPoolUtilization.labels("primary", "read").set(primary.utilization);
+  dbPoolTotalConnections.labels("primary", "read").set(primary.totalCount);
+  dbPoolIdleConnections.labels("primary", "read").set(primary.idleCount);
+  dbPoolWaitingConnections.labels("primary", "read").set(primary.waitingCount);
+  dbPoolMaxConnections.labels("primary", "read").set(primary.maxConnections);
+  dbPoolConfig
+    .labels("primary", "read", "min")
+    .set(primary.config.min);
+  dbPoolConfig
+    .labels("primary", "read", "idle_timeout_ms")
+    .set(primary.config.idleTimeoutMillis);
+  dbPoolConfig
+    .labels("primary", "read", "connection_timeout_ms")
+    .set(primary.config.connectionTimeoutMillis);
+
+  const write = snapshotPool(writePool, {
+    min: DB_WRITE_POOL_MIN,
+    idleTimeoutMillis: DB_WRITE_POOL_IDLE_TIMEOUT_MS,
+    connectionTimeoutMillis: DB_WRITE_POOL_CONNECTION_TIMEOUT_MS,
+  });
+  dbPoolUtilization.labels("write", "write").set(write.utilization);
+  dbPoolTotalConnections.labels("write", "write").set(write.totalCount);
+  dbPoolIdleConnections.labels("write", "write").set(write.idleCount);
+  dbPoolWaitingConnections.labels("write", "write").set(write.waitingCount);
+  dbPoolMaxConnections.labels("write", "write").set(write.maxConnections);
+  dbPoolConfig.labels("write", "write", "min").set(write.config.min);
+  dbPoolConfig
+    .labels("write", "write", "idle_timeout_ms")
+    .set(write.config.idleTimeoutMillis);
+  dbPoolConfig
+    .labels("write", "write", "connection_timeout_ms")
+    .set(write.config.connectionTimeoutMillis);
+
+  replicaUrls.forEach((url, idx) => {
+    const rep = replicaPools[idx];
+    if (!rep) return;
+    const snap = snapshotPool(rep, {
+      min: 0,
+      idleTimeoutMillis: DB_REPLICA_POOL_IDLE_TIMEOUT_MS,
+      connectionTimeoutMillis: DB_REPLICA_POOL_CONNECTION_TIMEOUT_MS,
+    });
+    dbPoolUtilization.labels(url, "read").set(snap.utilization);
+    dbPoolTotalConnections.labels(url, "read").set(snap.totalCount);
+    dbPoolIdleConnections.labels(url, "read").set(snap.idleCount);
+    dbPoolWaitingConnections.labels(url, "read").set(snap.waitingCount);
+    dbPoolMaxConnections.labels(url, "read").set(snap.maxConnections);
+    dbPoolConfig.labels(url, "read", "min").set(snap.config.min);
+    dbPoolConfig
+      .labels(url, "read", "idle_timeout_ms")
+      .set(snap.config.idleTimeoutMillis);
+    dbPoolConfig
+      .labels(url, "read", "connection_timeout_ms")
+      .set(snap.config.connectionTimeoutMillis);
+  });
+}
+
+/**
+ * Start the periodic pool utilization monitor. Idempotent – subsequent calls
+ * are ignored so importing this module from multiple places is safe.
+ */
+let poolMonitorStarted = false;
+export function startPoolUtilizationMonitor(): void {
+  if (poolMonitorStarted) return;
+  poolMonitorStarted = true;
+  updatePoolMetrics();
+  setInterval(updatePoolMetrics, DB_POOL_MONITOR_INTERVAL_MS);
+}
+
+startPoolUtilizationMonitor();

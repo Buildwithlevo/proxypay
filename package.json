@@ -41,6 +41,8 @@
     "backup:verify": "tsx src/scripts/verify-backups.ts",
     "monitor:replication": "tsx src/scripts/monitor-replication.ts",
     "reindex:bloated-indexes": "tsx src/scripts/reindex-bloated-indexes.ts",
+    "translations:validate": "tsx src/scripts/validate-translations.ts",
+    "translations:list": "tsx src/scripts/validate-translations.ts --list",
     "postinstall": "npm run prepare",
     "contracts:build": "cd contracts && cargo build --target wasm32-unknown-unknown --release",
     "contracts:test": "cd contracts && cargo test",
