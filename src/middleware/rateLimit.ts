@@ -576,7 +576,13 @@ export const cleanupRateLimitStore = () => {
 setInterval(cleanupRateLimitStore, 30 * 60 * 1000);
 
 /**
- * Default export: Combined rate limit middleware for general API protection.
- * Applies list query limits followed by the next middleware.
+ * Fix: Default export corrected to use globalRateLimit instead of
+ * rateLimitAdminOperations. The global middleware registered via
+ * `app.use(rateLimitDefaultMiddleware)` in src/index.ts is intended as a
+ * safety-net for ALL incoming requests, enforcing RATE_LIMIT_CONFIG.GLOBAL_LIMIT
+ * (200 req/min per IP) with RATE_LIMIT_CONFIG.GLOBAL_WINDOW_MS (60 000 ms).
+ * Previously, rateLimitAdminOperations was exported as default, which only
+ * applied list-query checks and did not enforce the global window limit,
+ * leaving the application without effective global rate limiting.
  */
-export default rateLimitAdminOperations;
+export default globalRateLimit;
