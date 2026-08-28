@@ -417,6 +417,46 @@ describe("Circuit Breaker Failover Simulation (#374)", () => {
       expect(fallbackResult).toEqual({ success: true, data: "fallback-takeover" });
     });
 
+    it("concurrent requests during circuit open state all receive fallback responses", async () => {
+      const failExecute = async () => ({
+        success: false,
+        error: new Error("concurrent-open-fail"),
+      });
+
+      // Trip the circuit breaker open by exhausting the volume threshold
+      for (let i = 0; i < 3; i++) {
+        await executeWithCircuitBreaker({
+          provider: "load_concurrent_open",
+          operation: "requestPayment",
+          execute: failExecute,
+        }).catch(() => {});
+      }
+
+      // Allow enough time for the open state to settle
+      await sleep(20);
+
+      // Simulate 5 concurrent requests hitting the open circuit — all should get the fallback
+      const concurrentResults = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          executeWithCircuitBreaker({
+            provider: "load_concurrent_open",
+            operation: "requestPayment",
+            execute: failExecute,
+            fallback: async () => ({
+              success: true,
+              data: "open-circuit-concurrent-fallback",
+            }),
+          }),
+        ),
+      );
+
+      expect(concurrentResults).toHaveLength(5);
+      expect(concurrentResults.every((r) => r.success)).toBe(true);
+      expect(
+        concurrentResults.every((r) => r.data === "open-circuit-concurrent-fallback"),
+      ).toBe(true);
+    });
+
     it("sequential failures open breaker, sequential successes keep it closed", async () => {
       const successExecute = async () => ({
         success: true,
@@ -593,6 +633,59 @@ describe("Circuit Breaker Failover Simulation (#374)", () => {
         });
         expect(result).toEqual({ success: true, data: "fully-recovered" });
       }
+    });
+
+    it("circuit transitions correctly through closed -> open -> half-open -> closed cycle", async () => {
+      let calls = 0;
+      const execute = async () => {
+        calls++;
+        // First 2 calls fail to trip the breaker open (volume threshold = 2, error % = 50)
+        if (calls <= 2) {
+          return { success: false, error: new Error("cycle-fail") };
+        }
+        // Subsequent calls succeed (used for the half-open probe and closed verification)
+        return { success: true, data: "cycle-recovered" };
+      };
+
+      // CLOSED -> OPEN: trigger enough failures to open the circuit
+      for (let i = 0; i < 2; i++) {
+        await executeWithCircuitBreaker({
+          provider: "recovery_cycle",
+          operation: "requestPayment",
+          execute,
+        }).catch(() => {});
+      }
+
+      // Verify circuit is OPEN: next call without fallback should be rejected
+      await sleep(20);
+      await expect(
+        executeWithCircuitBreaker({
+          provider: "recovery_cycle",
+          operation: "requestPayment",
+          execute,
+        }),
+      ).rejects.toThrow();
+
+      // OPEN -> HALF-OPEN: wait for the reset timeout to expire
+      await sleep(150);
+
+      // HALF-OPEN -> CLOSED: the probe request succeeds, closing the circuit
+      const probeResult = await executeWithCircuitBreaker({
+        provider: "recovery_cycle",
+        operation: "requestPayment",
+        execute,
+      });
+
+      expect(probeResult).toEqual({ success: true, data: "cycle-recovered" });
+
+      // CLOSED verification: subsequent requests also succeed normally
+      const verifyResult = await executeWithCircuitBreaker({
+        provider: "recovery_cycle",
+        operation: "requestPayment",
+        execute,
+      });
+
+      expect(verifyResult).toEqual({ success: true, data: "cycle-recovered" });
     });
   });
 });
