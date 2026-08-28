@@ -209,6 +209,22 @@ export class WebhookRetryPolicyService {
     return policy.retryableStatusCodes.includes(statusCode);
   }
 
+  /**
+   * Returns the list of deterministic delay values (without jitter) for each attempt
+   * from 0 to maxAttempts-1, using exponential backoff capped at maxDelayMs.
+   */
+  computeBackoffSequence(policy: WebhookRetryPolicy): number[] {
+    const sequence: number[] = [];
+    for (let attempt = 0; attempt < policy.maxAttempts; attempt++) {
+      const delay = Math.min(
+        policy.baseDelayMs * Math.pow(policy.backoffMultiplier, attempt),
+        policy.maxDelayMs,
+      );
+      sequence.push(delay);
+    }
+    return sequence;
+  }
+
   async getRetryMetrics(merchantId: string): Promise<{
     totalAttempts: number;
     successfulDeliveries: number;
@@ -240,4 +256,32 @@ export class WebhookRetryPolicyService {
       policy,
     };
   }
+}
+
+export interface RetryPolicyResult {
+  delayMs: number;
+  shouldRetry: boolean;
+}
+
+/**
+ * Applies a WebhookRetryPolicy to a given attempt and returns the computed
+ * delay with jitter and whether another retry should be made.
+ *
+ * @param policy - The retry policy configuration
+ * @param attempt - The current attempt index (0-indexed)
+ * @returns An object containing delayMs and shouldRetry
+ */
+export function applyRetryPolicy(
+  policy: WebhookRetryPolicy,
+  attempt: number,
+): RetryPolicyResult {
+  const exponentialDelay = policy.baseDelayMs * Math.pow(policy.backoffMultiplier, attempt);
+  const delay = Math.min(exponentialDelay, policy.maxDelayMs);
+  const finalDelay = delay * (1 + (Math.random() - 0.5) * 2 * policy.jitterFactor);
+  const shouldRetry = attempt < policy.maxAttempts - 1;
+
+  return {
+    delayMs: finalDelay,
+    shouldRetry,
+  };
 }
