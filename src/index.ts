@@ -103,6 +103,7 @@ import accountingReconciliationRoutes from "./routes/accountingReconciliation";
 import exchangeRateBufferRoutes from "./routes/exchangeRateBuffers";
 import adminAssetRoutes from "./routes/admin/assets";
 import settingsRoutes from "./routes/settings";
+import { requestLogger } from "./middleware/logger";
 import { statementsRoutes } from "./routes/statements";
 import subscriptionsRoutes from "./routes/subscriptions";
 import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
@@ -224,6 +225,7 @@ app.use(
 app.use(rateLimitDefaultMiddleware);
 app.use(responseTime);
 app.use(requestId);
+app.use(requestLogger);
 app.use(readReplicaRoutingMiddleware);
 app.use(i18nMiddleware);
 app.use(dbConnectionLeakDetector);
@@ -356,6 +358,10 @@ app.get("/ready", async (_req: Request, res: Response) => {
     timestamp: new Date().toISOString(),
   };
   res.status(allReady ? 200 : 503).json(body);
+});
+
+app.get("/admin/dashboard", (_req: Request, res: Response) => {
+  res.sendFile(path.join(process.cwd(), "public", "admin-dashboard.html"));
 });
 
 // Load Balancer Health Check
@@ -499,6 +505,7 @@ app.use("/api/reconciliation", reconciliationRoutes);
 app.use("/api/exchange-rate-buffers", exchangeRateBufferRoutes);
 app.use("/api/admin/assets", adminAssetRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/preferences", settingsRoutes);
 app.use("/api/statements", statementsRoutes);
 app.use("/api/subscriptions", subscriptionsRoutes);
 app.use("/", paymentLinkRoutes);
