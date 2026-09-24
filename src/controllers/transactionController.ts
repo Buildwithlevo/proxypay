@@ -42,6 +42,7 @@ import {
   PaginationError,
 } from "../utils/pagination";
 import { activityTrackingService } from "../services/activityTrackingService";
+import { transactionReversalService } from "../services/transactionReversalService";
 
 const IDEMPOTENCY_TTL_HOURS = Number(
   process.env.IDEMPOTENCY_KEY_TTL_HOURS || 24,
@@ -867,7 +868,6 @@ export const updateNotesHandler = async (req: Request, res: Response) => {
 export const refundTransactionHandler = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-
     const transaction = await transactionModel.findById(id);
     if (!transaction) {
       throw createError(ERROR_CODES.NOT_FOUND, null, {
@@ -875,52 +875,30 @@ export const refundTransactionHandler = async (req: Request, res: Response) => {
       });
     }
 
-    if (transaction.type !== "withdraw") {
-      throw createError(ERROR_CODES.INVALID_INPUT, null, {
-        error: "Only withdrawal transactions can be refunded",
-      });
-    }
-
-    if (transaction.status !== TransactionStatus.Failed) {
-      throw createError(
-        ERROR_CODES.INVALID_INPUT,
-        `Cannot refund transaction with status '${transaction.status}'. Only failed transactions are eligible.`,
-        {
-          error: `Cannot refund transaction with status '${transaction.status}'. Only failed transactions are eligible.`,
-        },
-      );
-    }
-
-    const amount = parseFloat(transaction.amount);
-    const { calculateFee } = await import("../utils/fees.js");
-    const { fee } = await calculateFee(amount);
-    const refundAmount = parseFloat((amount - fee).toFixed(2));
-
-    if (refundAmount <= 0) {
-      throw createError(
-        ERROR_CODES.INVALID_INPUT,
-        "Refund amount after fees is zero or negative",
-        {
-          error: "Refund amount after fees is zero or negative",
-        },
-      );
-    }
-
-    await transactionModel.updateStatus(id, TransactionStatus.Completed);
+    const actorId = (req as Request & { user?: { id?: string } }).user?.id;
+    const result = await transactionReversalService.reverse(
+      id,
+      req.body?.reason || "Administrative refund",
+      actorId,
+    );
 
     return res.json({
       message: "Refund processed successfully",
       transactionId: id,
-      originalAmount: amount,
-      feeDeducted: fee,
-      refundAmount,
+      originalAmount: transaction.amount,
+      refundAmount: transaction.amount,
+      alreadyRefunded: result.reversal.alreadyReversed,
+      transaction: result.transaction,
     });
   } catch (err) {
     if (err && (err as any).code) throw err;
-    console.error("Refund error:", err);
-    throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to process refund", {
-      error: "Failed to process refund",
-    });
+    const message = err instanceof Error ? err.message : "Failed to process refund";
+    const code = message.includes("not found")
+      ? ERROR_CODES.NOT_FOUND
+      : message.includes("Cannot reverse") || message.includes("No ledger")
+        ? ERROR_CODES.INVALID_INPUT
+        : ERROR_CODES.INTERNAL_ERROR;
+    throw createError(code, message, { error: message });
   }
 };
 

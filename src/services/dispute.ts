@@ -35,6 +35,7 @@ import {
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import logger from "../utils/logger";
 import { notificationRouter } from "./notificationRouter";
+import { TransactionReversalService } from "./transactionReversalService";
 
 // ---------------------------------------------------------------------------
 // Allowed status transitions
@@ -114,6 +115,7 @@ async function sendNotification(payload: NotificationPayload): Promise<void> {
 export class DisputeService {
   private disputeModel = new DisputeModel();
   private transactionModel = new TransactionModel();
+  private reversalService = new TransactionReversalService(this.transactionModel);
 
   /**
    * Open a new dispute for a transaction.
@@ -282,11 +284,16 @@ export class DisputeService {
 
     const nextDisputeStatus: DisputeStatus =
       action === "reverse" ? "reversed" : "upheld";
-    const nextTransactionStatus =
-      action === "reverse"
-        ? TransactionStatus.Reversed
-        : TransactionStatus.Completed;
     const trimmedResolution = resolution.trim();
+
+    if (action === "reverse") {
+      await this.reversalService.reverse(
+        dispute.transactionId,
+        trimmedResolution,
+        adminId,
+        { allowCompleted: true },
+      );
+    }
 
     const updated = await this.disputeModel.update(disputeId, {
       status: nextDisputeStatus,
@@ -294,10 +301,17 @@ export class DisputeService {
       assignedTo: adminId,
     });
 
-    await this.transactionModel.updateStatus(
-      dispute.transactionId,
-      nextTransactionStatus,
-    );
+    const nextTransactionStatus =
+      action === "reverse"
+        ? TransactionStatus.Reversed
+        : TransactionStatus.Completed;
+
+    if (action === "uphold") {
+      await this.transactionModel.updateStatus(
+        dispute.transactionId,
+        nextTransactionStatus,
+      );
+    }
 
     await this.disputeModel.addNote(
       disputeId,

@@ -539,13 +539,18 @@ router.get(
   requireAdmin,
   rateLimitListQueries,
   logAdminAction("LIST_USERS"),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const page = Number(req.query.page) || 1;
     const limit = Number(req.query.limit) || 10;
 
-    const result = paginate(users, page, limit);
-
-    res.json(result);
+    const result = await new UserModel().list(limit, (page - 1) * limit);
+    res.json({
+      data: result.users,
+      total: result.total,
+      page,
+      limit,
+      totalPages: Math.ceil(result.total / limit),
+    });
   },
 );
 // GET /api/admin/users/:id
@@ -553,8 +558,8 @@ router.get(
   "/users/:id",
   requireAdmin,
   logAdminAction("GET_USER"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
+  async (req: Request, res: Response) => {
+    const user = await new UserModel().findById(req.params.id);
 
     if (!user) {
       throw createError(ERROR_CODES.NOT_FOUND, "User not found", {

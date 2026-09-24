@@ -77,6 +77,30 @@ export interface User {
 }
 
 export class UserModel {
+  async list(limit = 50, offset = 0): Promise<{ users: Array<Pick<User, "id" | "kycLevel" | "status" | "createdAt" | "updatedAt">>; total: number }> {
+    const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 100);
+    const safeOffset = Math.max(Math.trunc(offset), 0);
+    const result = await queryRead(
+      `SELECT id, kyc_level, status, created_at, updated_at,
+              COUNT(*) OVER() AS total_count
+       FROM users
+       ORDER BY created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [safeLimit, safeOffset],
+    );
+
+    return {
+      users: result.rows.map((row) => ({
+        id: row.id,
+        kycLevel: row.kyc_level,
+        status: row.status,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      })),
+      total: result.rows.length > 0 ? Number(result.rows[0].total_count) : 0,
+    };
+  }
+
   async findById(id: string, requester?: { id: string; role: string }): Promise<User | null> {
     const result = await queryRead("SELECT * FROM users WHERE id = $1", [id]);
     if (result.rows.length === 0) return null;
